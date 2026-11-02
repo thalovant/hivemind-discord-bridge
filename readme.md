@@ -76,8 +76,7 @@ hivemind-discord-bridge \
 By default the bridge answers direct messages and any text channel the
 bot can read. Pass `--allowed-channel <channel_id>` (repeatable) to
 restrict channel replies to specific channels; DMs are always accepted
-regardless of this setting. `--token` also reads from the
-`DISCORD_BOT_TOKEN` environment variable if the flag is omitted.
+regardless of this setting.
 
 Useful flags:
 
@@ -90,6 +89,26 @@ Useful flags:
   `en-us`).
 
 Run `hivemind-discord-bridge --help` for the full list.
+
+Every flag also falls back to an environment variable, so the bridge can
+run with no secret on its command line, where any other process on the
+host could read it:
+
+| Flag | Variable |
+| --- | --- |
+| `--token` | `DISCORD_BOT_TOKEN` |
+| `--allowed-channel` | `DISCORD_ALLOWED_CHANNELS` (ids separated by commas) |
+| `--access-key` | `HIVEMIND_ACCESS_KEY` |
+| `--password` | `HIVEMIND_PASSWORD` |
+| `--host` | `HIVEMIND_HOST` |
+| `--port` | `HIVEMIND_PORT` |
+| `--site-id` | `HIVEMIND_SITE_ID` |
+| `--self-signed` | `HIVEMIND_SELF_SIGNED` (`true`/`false`) |
+| `--lang` | `HIVEMIND_LANG` |
+
+The token, access key and password also accept `<VARIABLE>_FILE`, the
+path of a file holding the value, which is how container platforms mount
+secrets. A flag wins over its variable, and the variable over its file.
 
 ## Docker
 
@@ -105,6 +124,11 @@ docker run --rm \
 
 or via `docker-compose.yml` — copy it, fill in the environment section,
 and `docker compose up`.
+
+The image runs as an unprivileged user and keeps the HiveMind identity in
+`/home/bridge/.config/hivemind`. Mount a volume there so the identity
+survives a restart: the hub pins the identity's key, and a new one on
+every start is refused.
 
 ## What this bridge does, precisely
 

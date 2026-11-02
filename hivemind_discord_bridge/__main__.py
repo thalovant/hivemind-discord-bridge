@@ -2,7 +2,15 @@
 
 HiveMind identity (key/password/host/port) defaults to the values stored
 by ``hivemind-client set-identity``; flags override them.
+
+Every option can also come from the environment, so a container never has
+to put a secret on its command line, where any process on the host can
+read it. Secrets additionally accept a ``*_FILE`` variable naming a file
+that holds the value, the convention for secrets mounted into a container.
+A flag wins over its environment variable, and the variable over its file.
 """
+import os
+
 import click
 from ovos_utils.log import LOG
 
@@ -22,26 +30,66 @@ def connect_discord_to_hivemind(token, key=None, password=None,
     return bridge
 
 
-@click.command()
-@click.option("--token", required=True, envvar="DISCORD_BOT_TOKEN",
-             help="Discord bot token from the Developer Portal")
-@click.option("--allowed-channel", "allowed_channels", multiple=True, type=int,
+def _from_file(value, variable):
+    """``value`` when given, else the contents of the file named by ``<variable>_FILE``."""
+    if value:
+        return value
+    path = os.environ.get(f"{variable}_FILE")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError as error:
+        raise click.UsageError(f"{variable}_FILE: cannot read {path}: {error.strerror}") from None
+
+
+def _channel_ids(ctx, param, values):
+    """Channel ids from repeated flags, or from one variable separated by commas or spaces."""
+    ids = []
+    for value in values or ():
+        for item in str(value).replace(",", " ").split():
+            try:
+                ids.append(int(item))
+            except ValueError:
+                raise click.BadParameter(f"{item!r} is not a channel id") from None
+    return ids
+
+
+@click.command(epilog="Every option falls back to the environment variable named "
+                      "in its help. The token, access key and password also accept "
+                      "<VARIABLE>_FILE naming a file that holds the value.")
+@click.option("--token", default=None, envvar="DISCORD_BOT_TOKEN",
+             help="Discord bot token from the Developer Portal [DISCORD_BOT_TOKEN]")
+@click.option("--allowed-channel", "allowed_channels", multiple=True,
+             envvar="DISCORD_ALLOWED_CHANNELS", callback=_channel_ids,
              help="Discord text channel id allowed to talk to the bridge "
-                  "(repeatable); default: any channel the bot can read, plus DMs")
-@click.option("--access-key", "key", default=None,
-             help="HiveMind access key (default: from identity file)")
-@click.option("--password", default=None,
-             help="HiveMind password (default: from identity file)")
-@click.option("--host", default=None,
-             help="HiveMind host, e.g. ws://127.0.0.1 (default: from identity file)")
-@click.option("--port", type=int, default=5678, help="HiveMind port (default: 5678)")
-@click.option("--site-id", default="discord",
-             help="this bridge's HiveMind site id (default: discord)")
-@click.option("--self-signed", is_flag=True, help="accept self-signed SSL certificates")
-@click.option("--lang", default="en-us", help="utterance language")
+                  "(repeatable); default: any channel the bot can read, plus DMs "
+                  "[DISCORD_ALLOWED_CHANNELS, ids separated by commas]")
+@click.option("--access-key", "key", default=None, envvar="HIVEMIND_ACCESS_KEY",
+             help="HiveMind access key (default: from identity file) [HIVEMIND_ACCESS_KEY]")
+@click.option("--password", default=None, envvar="HIVEMIND_PASSWORD",
+             help="HiveMind password (default: from identity file) [HIVEMIND_PASSWORD]")
+@click.option("--host", default=None, envvar="HIVEMIND_HOST",
+             help="HiveMind host, e.g. ws://127.0.0.1 (default: from identity file) "
+                  "[HIVEMIND_HOST]")
+@click.option("--port", type=int, default=5678, envvar="HIVEMIND_PORT",
+             help="HiveMind port (default: 5678) [HIVEMIND_PORT]")
+@click.option("--site-id", default="discord", envvar="HIVEMIND_SITE_ID",
+             help="this bridge's HiveMind site id (default: discord) [HIVEMIND_SITE_ID]")
+@click.option("--self-signed", is_flag=True, envvar="HIVEMIND_SELF_SIGNED",
+             help="accept self-signed SSL certificates [HIVEMIND_SELF_SIGNED]")
+@click.option("--lang", default="en-us", envvar="HIVEMIND_LANG",
+             help="utterance language [HIVEMIND_LANG]")
 def main(token, allowed_channels, key, password, host, port, site_id,
         self_signed, lang):
     """Bridge a Discord bot to a HiveMind node."""
+    token = _from_file(token, "DISCORD_BOT_TOKEN")
+    if not token:
+        raise click.UsageError("a bot token is required: --token, DISCORD_BOT_TOKEN "
+                               "or DISCORD_BOT_TOKEN_FILE")
+    key = _from_file(key, "HIVEMIND_ACCESS_KEY")
+    password = _from_file(password, "HIVEMIND_PASSWORD")
     if host and not host.startswith("ws://") and not host.startswith("wss://"):
         host = "ws://" + host
 
