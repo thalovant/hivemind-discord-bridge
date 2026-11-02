@@ -93,6 +93,11 @@ channel one person's follow-up ("and tomorrow?") continues whatever the
 last person asked. Pass `--session-scope person` to give each person their
 own conversation in each channel.
 
+`--health-port <port>` serves two endpoints for container platforms:
+`/healthz` answers 200 while the process runs, and `/readyz` answers 200
+only while the HiveMind session is up and the Discord connection is ready
+(503 otherwise). They serve no data and accept no input.
+
 Useful flags:
 
 - `--site-id`: this bridge's HiveMind site id. If you run more than one
@@ -115,6 +120,7 @@ host could read it:
 | `--allowed-channel` | `DISCORD_ALLOWED_CHANNELS` (ids separated by commas) |
 | `--no-require-mention` | `DISCORD_REQUIRE_MENTION` (`true`/`false`) |
 | `--session-scope` | `DISCORD_SESSION_SCOPE` (`channel`/`person`) |
+| `--health-port` | `BRIDGE_HEALTH_PORT` |
 | `--access-key` | `HIVEMIND_ACCESS_KEY` |
 | `--password` | `HIVEMIND_PASSWORD` |
 | `--host` | `HIVEMIND_HOST` |

@@ -29,7 +29,7 @@ CLEAN = {name: None for name in (
     "HIVEMIND_ACCESS_KEY", "HIVEMIND_ACCESS_KEY_FILE", "HIVEMIND_PASSWORD",
     "HIVEMIND_PASSWORD_FILE", "HIVEMIND_HOST", "HIVEMIND_PORT", "HIVEMIND_SITE_ID",
     "HIVEMIND_SELF_SIGNED", "HIVEMIND_LANG", "DISCORD_REQUIRE_MENTION",
-    "DISCORD_SESSION_SCOPE")}
+    "DISCORD_SESSION_SCOPE", "BRIDGE_HEALTH_PORT")}
 
 
 def test_everything_can_come_from_the_environment(started):
@@ -44,13 +44,14 @@ def test_everything_can_come_from_the_environment(started):
         "HIVEMIND_SELF_SIGNED": "true",
         "HIVEMIND_LANG": "fr-fr",
         "DISCORD_SESSION_SCOPE": "person",
+        "BRIDGE_HEALTH_PORT": "8080",
     }, started)
     assert result.exit_code == 0, result.output
     assert options == {
         "token": "tok", "key": "key", "password": "pw", "host": "ws://hub.local",
         "port": 6000, "self_signed": True, "lang": "fr-fr", "site_id": "lounge",
         "allowed_channels": [42, 43], "require_mention": True,
-        "session_scope": "person",
+        "session_scope": "person", "health_port": 8080,
     }
 
 

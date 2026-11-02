@@ -40,6 +40,8 @@ from hivemind_bus_client import (
 from ovos_bus_client.message import Message
 from ovos_utils.log import LOG
 
+from hivemind_discord_bridge.health import HealthServer
+
 platform = "HiveMindDiscordBridgeV0.1"
 
 # hivemind-bus-client >= 1.0.13a1 makes HiveMessageBusClient.connect()
@@ -71,6 +73,7 @@ class HiveMindDiscordBridge:
                  handshake_max_retries: int = DEFAULT_HANDSHAKE_MAX_RETRIES,
                  require_mention: bool = True,
                  session_scope: str = "channel",
+                 health_port: Optional[int] = None,
                  *,
                  client: Optional[HiveMessageBusClient] = None,
                  discord_client: Optional[discord.Client] = None):
@@ -99,6 +102,8 @@ class HiveMindDiscordBridge:
         session_scope: ``"channel"`` (one hub session per channel or DM) or
             ``"person"`` (one per person in each channel). In a DM the two
             are the same conversation.
+        health_port: if set, serve ``/healthz`` and ``/readyz`` on this
+            port (see :mod:`hivemind_discord_bridge.health`).
         client: pre-built HiveMessageBusClient (tests / advanced setups).
             NOTE: HiveMessageBusClient does NOT open a connection in
             __init__ -- call start() (or connect_hivemind()) to connect.
@@ -137,6 +142,8 @@ class HiveMindDiscordBridge:
             self_signed=self_signed,
         )
 
+        self.health_port = health_port
+        self._health: Optional[HealthServer] = None
         self._started = False
         self._connected = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -168,6 +175,9 @@ class HiveMindDiscordBridge:
         if self._started:
             return
         self._started = True
+        if self.health_port is not None:
+            self._health = HealthServer(self.health_port, self.ready)
+            self._health.start()
         self.connect_hivemind()
         LOG.warning(
             "a freshly registered HiveMind client is denied every message "
@@ -193,6 +203,22 @@ class HiveMindDiscordBridge:
             LOG.exception("error closing HiveMind client")
         self._started = False
         self._connected.clear()
+        if self._health is not None:
+            self._health.stop()
+            self._health = None
+
+    def ready(self) -> bool:
+        """Whether a message can go end to end right now.
+
+        The HiveMind session must be live, not just once established: the
+        client clears its handshake event when the connection drops and sets
+        it again on reconnect. And the Discord gateway connection must be
+        ready and not closed.
+        """
+        handshake = getattr(self.client, "handshake_event", None)
+        hub_up = self._connected.is_set() and (handshake is None or handshake.is_set())
+        discord_up = bool(self.discord.is_ready()) and not bool(self.discord.is_closed())
+        return bool(hub_up and discord_up)
 
     # ------------------------------------------------------------------
     # Discord -> HiveMind
