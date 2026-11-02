@@ -1,10 +1,10 @@
-Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Thalovant fork set up: fixes on main, Thalovant CI and signed images, docs set added.
+Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Address the CI and documentation review: publish from main only, sign before :latest, pinned audit evidence, qualified claims.
 
 # FAQ: hivemind-discord-bridge
 
 ## Why does the bot ignore some messages in a channel?
 
-In a channel with several people, `HiveMindDiscordBridge.addressed_text` forwards only messages that mention the bot or reply to one of its messages, and removes the mention first. Direct messages need no mention. `--no-require-mention` (`DISCORD_REQUIRE_MENTION=false`) forwards every message.
+In a channel with several people, `HiveMindDiscordBridge.addressed_text` forwards only messages that mention the bot, and removes the mention first. A reply to one of the bot's messages counts when it pings the bot, which is Discord's default for replies: in the default mode the bot does not request the Message Content intent, so a reply with the ping turned off arrives without its text and is ignored. Direct messages need no mention. `--no-require-mention` (`DISCORD_REQUIRE_MENTION=false`) forwards every message, and needs the intent.
 
 ## How do I keep secrets off the command line?
 

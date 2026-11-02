@@ -1,6 +1,12 @@
-Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Thalovant fork set up: fixes on main, Thalovant CI and signed images, docs set added.
+Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Address the CI and documentation review: publish from main only, sign before :latest, pinned audit evidence, qualified claims.
 
 # Suggestions: hivemind-discord-bridge
+
+## Restrict direct messages
+
+- **Problem:** AUDIT.md section 1: `--allowed-channel` does not cover DMs, so anyone who can DM the bot reaches the hub.
+- **Proposal:** a `--dm-policy` setting (`open`, `allowed-users`, `off`) with a user-id allow-list, by flag and environment variable; a managed deployment uses `allowed-users` or `off`.
+- **Impact:** high for any bot whose server members are not all trusted; small change.
 
 ## Per-person rate limit
 

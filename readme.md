@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: settings from the environment and secret files, mention gating, per-person sessions, health endpoints.
+Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Address the CI and documentation review: publish from main only, sign before :latest, pinned audit evidence, qualified claims.
 
 # HiveMind Discord Bridge
 
@@ -82,8 +82,11 @@ restrict channel replies to specific channels; DMs are always accepted
 regardless of this setting.
 
 In a server channel, the bridge forwards only messages that mention the
-bot (`@bot what time is it`) or reply to one of its messages, and removes
-the mention before forwarding, so the hub is asked `what time is it`.
+bot (`@bot what time is it`), and removes the mention before forwarding, so
+the hub is asked `what time is it`. A reply to one of the bot's messages
+counts when it pings the bot (Discord's default for replies); a reply with
+the ping turned off arrives without its text unless the message content
+intent is enabled, and is ignored.
 Direct messages need no mention. Because Discord delivers the content of
 DMs and of messages that mention the bot without it, the bot does not
 request the privileged message content intent. Pass `--no-require-mention`
