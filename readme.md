@@ -88,6 +88,11 @@ request the privileged message content intent. Pass `--no-require-mention`
 to forward every message in every channel the bot can read; that mode
 needs the intent enabled in the Developer Portal.
 
+Each Discord channel (or DM) is one conversation on the hub, so in a
+channel one person's follow-up ("and tomorrow?") continues whatever the
+last person asked. Pass `--session-scope person` to give each person their
+own conversation in each channel.
+
 Useful flags:
 
 - `--site-id`: this bridge's HiveMind site id. If you run more than one
@@ -109,6 +114,7 @@ host could read it:
 | `--token` | `DISCORD_BOT_TOKEN` |
 | `--allowed-channel` | `DISCORD_ALLOWED_CHANNELS` (ids separated by commas) |
 | `--no-require-mention` | `DISCORD_REQUIRE_MENTION` (`true`/`false`) |
+| `--session-scope` | `DISCORD_SESSION_SCOPE` (`channel`/`person`) |
 | `--access-key` | `HIVEMIND_ACCESS_KEY` |
 | `--password` | `HIVEMIND_PASSWORD` |
 | `--host` | `HIVEMIND_HOST` |

@@ -48,6 +48,12 @@ platform = "HiveMindDiscordBridgeV0.1"
 # (down, wrong password) fails fast instead of hanging the bridge.
 DEFAULT_HANDSHAKE_MAX_RETRIES = 10
 
+#: How conversations are kept apart on the hub. ``channel``: one session per
+#: Discord channel or DM, shared by everyone in a channel. ``person``: one
+#: session per person in each channel, so each person's follow-up questions
+#: continue their own conversation.
+SESSION_SCOPES = ("channel", "person")
+
 
 class HiveMindDiscordBridge:
     """Bridge a Discord bot to a HiveMind node."""
@@ -64,6 +70,7 @@ class HiveMindDiscordBridge:
                  allowed_channels: Optional[Iterable[int]] = None,
                  handshake_max_retries: int = DEFAULT_HANDSHAKE_MAX_RETRIES,
                  require_mention: bool = True,
+                 session_scope: str = "channel",
                  *,
                  client: Optional[HiveMessageBusClient] = None,
                  discord_client: Optional[discord.Client] = None):
@@ -89,6 +96,9 @@ class HiveMindDiscordBridge:
             Discord's privileged message content intent, which it then does
             not request: Discord delivers the content of DMs and of messages
             that mention the bot without it.
+        session_scope: ``"channel"`` (one hub session per channel or DM) or
+            ``"person"`` (one per person in each channel). In a DM the two
+            are the same conversation.
         client: pre-built HiveMessageBusClient (tests / advanced setups).
             NOTE: HiveMessageBusClient does NOT open a connection in
             __init__ -- call start() (or connect_hivemind()) to connect.
@@ -103,6 +113,10 @@ class HiveMindDiscordBridge:
         self.allowed_channels = set(allowed_channels) if allowed_channels else None
         self.handshake_max_retries = handshake_max_retries
         self.require_mention = require_mention
+        if session_scope not in SESSION_SCOPES:
+            raise ValueError(f"session_scope must be one of {SESSION_SCOPES}, "
+                             f"not {session_scope!r}")
+        self.session_scope = session_scope
 
         if discord_client is not None:
             self.discord = discord_client
@@ -260,10 +274,17 @@ class HiveMindDiscordBridge:
                 "channel_id": channel_id,
                 "user": {"discord_username": username,
                         "discord_user_id": getattr(author, "id", None)},
-                "session": {"session_id": f"discord-{channel_id}"},
+                "session": {"session_id": self.session_id(channel_id, author)},
             },
         )
         self.client.emit(HiveMessage(HiveMessageType.BUS, msg))
+
+    def session_id(self, channel_id: int, author) -> str:
+        """The hub session a message from ``author`` in ``channel_id`` belongs to."""
+        author_id = getattr(author, "id", None)
+        if self.session_scope == "person" and author_id is not None:
+            return f"discord-{channel_id}-{author_id}"
+        return f"discord-{channel_id}"
 
     # ------------------------------------------------------------------
     # HiveMind -> Discord

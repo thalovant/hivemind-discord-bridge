@@ -28,7 +28,8 @@ CLEAN = {name: None for name in (
     "DISCORD_BOT_TOKEN", "DISCORD_BOT_TOKEN_FILE", "DISCORD_ALLOWED_CHANNELS",
     "HIVEMIND_ACCESS_KEY", "HIVEMIND_ACCESS_KEY_FILE", "HIVEMIND_PASSWORD",
     "HIVEMIND_PASSWORD_FILE", "HIVEMIND_HOST", "HIVEMIND_PORT", "HIVEMIND_SITE_ID",
-    "HIVEMIND_SELF_SIGNED", "HIVEMIND_LANG", "DISCORD_REQUIRE_MENTION")}
+    "HIVEMIND_SELF_SIGNED", "HIVEMIND_LANG", "DISCORD_REQUIRE_MENTION",
+    "DISCORD_SESSION_SCOPE")}
 
 
 def test_everything_can_come_from_the_environment(started):
@@ -42,12 +43,14 @@ def test_everything_can_come_from_the_environment(started):
         "HIVEMIND_SITE_ID": "lounge",
         "HIVEMIND_SELF_SIGNED": "true",
         "HIVEMIND_LANG": "fr-fr",
+        "DISCORD_SESSION_SCOPE": "person",
     }, started)
     assert result.exit_code == 0, result.output
     assert options == {
         "token": "tok", "key": "key", "password": "pw", "host": "ws://hub.local",
         "port": 6000, "self_signed": True, "lang": "fr-fr", "site_id": "lounge",
         "allowed_channels": [42, 43], "require_mention": True,
+        "session_scope": "person",
     }
 
 
@@ -102,3 +105,9 @@ def test_mention_gating_is_on_by_default_and_can_be_turned_off(started):
     assert run(["--token", "t", "--no-require-mention"], CLEAN, started)[1]["require_mention"] is False
     off = {**CLEAN, "DISCORD_REQUIRE_MENTION": "false"}
     assert run(["--token", "t"], off, started)[1]["require_mention"] is False
+
+
+def test_the_session_scope_defaults_to_the_channel_and_rejects_anything_else(started):
+    assert run(["--token", "t"], CLEAN, started)[1]["session_scope"] == "channel"
+    result, _ = run(["--token", "t"], {**CLEAN, "DISCORD_SESSION_SCOPE": "room"}, started)
+    assert result.exit_code != 0
