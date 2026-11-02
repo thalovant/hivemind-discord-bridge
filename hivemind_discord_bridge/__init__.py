@@ -27,6 +27,7 @@ recurring bug across every HiveMind bridge written so far:
   this bridge cannot do that step itself. See the README.
 """
 import asyncio
+import re
 import threading
 from typing import Iterable, Optional
 
@@ -62,6 +63,7 @@ class HiveMindDiscordBridge:
                  site_id: str = "discord",
                  allowed_channels: Optional[Iterable[int]] = None,
                  handshake_max_retries: int = DEFAULT_HANDSHAKE_MAX_RETRIES,
+                 require_mention: bool = True,
                  *,
                  client: Optional[HiveMessageBusClient] = None,
                  discord_client: Optional[discord.Client] = None):
@@ -80,6 +82,13 @@ class HiveMindDiscordBridge:
         handshake_max_retries: bound on HiveMessageBusClient's handshake
             retries; without it the client's own default of None retries
             forever and hangs the bridge if the hub never answers.
+        require_mention: in a server channel, forward only messages that
+            mention the bot or reply to one of its messages; DMs are always
+            forwarded. A bot that forwards every message asks the hub about
+            every conversation in every channel it can read. It also needs
+            Discord's privileged message content intent, which it then does
+            not request: Discord delivers the content of DMs and of messages
+            that mention the bot without it.
         client: pre-built HiveMessageBusClient (tests / advanced setups).
             NOTE: HiveMessageBusClient does NOT open a connection in
             __init__ -- call start() (or connect_hivemind()) to connect.
@@ -93,12 +102,14 @@ class HiveMindDiscordBridge:
         self.site_id = site_id
         self.allowed_channels = set(allowed_channels) if allowed_channels else None
         self.handshake_max_retries = handshake_max_retries
+        self.require_mention = require_mention
 
         if discord_client is not None:
             self.discord = discord_client
         else:
             intents = discord.Intents.default()
-            intents.message_content = True
+            # Only a bot that reads every message needs the privileged intent.
+            intents.message_content = not require_mention
             self.discord = discord.Client(intents=intents)
 
         self.discord.event(self.on_message)
@@ -195,12 +206,47 @@ class HiveMindDiscordBridge:
             LOG.debug(f"ignoring message from non-allowed channel {channel.id}")
             return
 
+        text = self.addressed_text(message, is_dm)
+        if text is None:
+            return
+
         if not self._connected.is_set():
             LOG.warning("dropping Discord message, not connected to "
                        "HiveMind yet")
             return
 
-        self.forward_to_hivemind(message.content, message.author, channel.id)
+        self.forward_to_hivemind(text, message.author, channel.id)
+
+    def addressed_text(self, message: "discord.Message", is_dm: bool) -> Optional[str]:
+        """The text to forward, or ``None`` when the message is not for the bot.
+
+        The bot's mention (``<@id>`` or ``<@!id>``) is removed wherever it
+        appears: "@bot what time is it" asks "what time is it". In a server
+        channel, with ``require_mention``, a message that neither mentions
+        the bot nor replies to it is not addressed to the bot at all.
+        """
+        bot_user = getattr(self.discord, "user", None)
+        bot_id = getattr(bot_user, "id", None)
+        text = message.content
+        mentioned = False
+        if bot_id is not None:
+            text, count = re.subn(rf"<@!?{bot_id}>", " ", text)
+            mentioned = count > 0 or any(
+                getattr(user, "id", None) == bot_id for user in (getattr(message, "mentions", None) or ()))
+            text = " ".join(text.split())
+        if not text:
+            return None
+        if self.require_mention and not is_dm:
+            if not (mentioned or self._replies_to_bot(message, bot_id)):
+                return None
+        return text
+
+    @staticmethod
+    def _replies_to_bot(message: "discord.Message", bot_id) -> bool:
+        reference = getattr(message, "reference", None)
+        replied = getattr(reference, "resolved", None) if reference is not None else None
+        author = getattr(replied, "author", None)
+        return bot_id is not None and author is not None and getattr(author, "id", None) == bot_id
 
     def forward_to_hivemind(self, text: str, author, channel_id: int) -> None:
         username = getattr(author, "name", None) or str(getattr(author, "id", "unknown"))

@@ -95,7 +95,8 @@ def test_connect_hivemind_bounds_handshake_retries():
 def test_inbound_message_forwarded_to_hivemind_after_connect():
     from hivemind_bus_client import HiveMessage, HiveMessageType
 
-    bridge, fake_client, fake_discord, _ = _make_bridge()
+    # every channel message, as a bot that reads them all forwards them
+    bridge, fake_client, fake_discord, _ = _make_bridge(require_mention=False)
     bridge.connect_hivemind()
 
     message = _fake_message(text="turn on the lights", user_id=1,
@@ -156,7 +157,8 @@ def test_disallowed_channel_is_ignored():
 
 
 def test_allowed_channel_is_forwarded():
-    bridge, fake_client, fake_discord, _ = _make_bridge(allowed_channels=[42])
+    bridge, fake_client, fake_discord, _ = _make_bridge(allowed_channels=[42],
+                                                        require_mention=False)
     bridge.connect_hivemind()
 
     message = _fake_message(channel_id=42)

@@ -20,11 +20,11 @@ from hivemind_discord_bridge import HiveMindDiscordBridge
 def connect_discord_to_hivemind(token, key=None, password=None,
                                 host=None, port=5678, self_signed=False,
                                 lang="en-us", site_id="discord",
-                                allowed_channels=None):
+                                allowed_channels=None, require_mention=True):
     bridge = HiveMindDiscordBridge(
         token=token, key=key, password=password, host=host, port=port,
         self_signed=self_signed, lang=lang, site_id=site_id,
-        allowed_channels=allowed_channels,
+        allowed_channels=allowed_channels, require_mention=require_mention,
     )
     bridge.start()
     return bridge
@@ -66,6 +66,12 @@ def _channel_ids(ctx, param, values):
              help="Discord text channel id allowed to talk to the bridge "
                   "(repeatable); default: any channel the bot can read, plus DMs "
                   "[DISCORD_ALLOWED_CHANNELS, ids separated by commas]")
+@click.option("--require-mention/--no-require-mention", default=True,
+             envvar="DISCORD_REQUIRE_MENTION",
+             help="in a server channel, forward only messages that mention the bot "
+                  "or reply to it (default); --no-require-mention forwards every "
+                  "message and needs the privileged message content intent "
+                  "[DISCORD_REQUIRE_MENTION]")
 @click.option("--access-key", "key", default=None, envvar="HIVEMIND_ACCESS_KEY",
              help="HiveMind access key (default: from identity file) [HIVEMIND_ACCESS_KEY]")
 @click.option("--password", default=None, envvar="HIVEMIND_PASSWORD",
@@ -81,8 +87,8 @@ def _channel_ids(ctx, param, values):
              help="accept self-signed SSL certificates [HIVEMIND_SELF_SIGNED]")
 @click.option("--lang", default="en-us", envvar="HIVEMIND_LANG",
              help="utterance language [HIVEMIND_LANG]")
-def main(token, allowed_channels, key, password, host, port, site_id,
-        self_signed, lang):
+def main(token, allowed_channels, require_mention, key, password, host, port,
+        site_id, self_signed, lang):
     """Bridge a Discord bot to a HiveMind node."""
     token = _from_file(token, "DISCORD_BOT_TOKEN")
     if not token:
@@ -100,6 +106,7 @@ def main(token, allowed_channels, key, password, host, port, site_id,
             host=host, port=port, self_signed=self_signed,
             lang=lang, site_id=site_id,
             allowed_channels=list(allowed_channels) or None,
+            require_mention=require_mention,
         )
     except KeyboardInterrupt:
         LOG.info("shutting down")

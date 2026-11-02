@@ -17,10 +17,11 @@ you own or a friendly server owner will give you.
    name, not the bot's username yet), and accept the terms.
 3. In the left sidebar, open **Bot**. Click **Add Bot** if it is not
    already there, and confirm.
-4. Still on the **Bot** page, turn on **MESSAGE CONTENT INTENT** under
-   "Privileged Gateway Intents". This bridge reads message text, and
-   Discord hides message content from bots by default unless this is
-   enabled. Save changes.
+4. Only if you will run the bridge with `--no-require-mention`: still on
+   the **Bot** page, turn on **MESSAGE CONTENT INTENT** under "Privileged
+   Gateway Intents" and save. A bot that answers only DMs and messages
+   that mention it (the default) does not need it, because Discord
+   delivers the content of those messages without the intent.
 5. On the same page, click **Reset Token** (or **Copy** if a token is
    already shown) to get the bot token. It looks like a long string of
    letters, numbers, and dots. Treat it like a password: anyone who has
@@ -78,6 +79,15 @@ bot can read. Pass `--allowed-channel <channel_id>` (repeatable) to
 restrict channel replies to specific channels; DMs are always accepted
 regardless of this setting.
 
+In a server channel, the bridge forwards only messages that mention the
+bot (`@bot what time is it`) or reply to one of its messages, and removes
+the mention before forwarding, so the hub is asked `what time is it`.
+Direct messages need no mention. Because Discord delivers the content of
+DMs and of messages that mention the bot without it, the bot does not
+request the privileged message content intent. Pass `--no-require-mention`
+to forward every message in every channel the bot can read; that mode
+needs the intent enabled in the Developer Portal.
+
 Useful flags:
 
 - `--site-id`: this bridge's HiveMind site id. If you run more than one
@@ -98,6 +108,7 @@ host could read it:
 | --- | --- |
 | `--token` | `DISCORD_BOT_TOKEN` |
 | `--allowed-channel` | `DISCORD_ALLOWED_CHANNELS` (ids separated by commas) |
+| `--no-require-mention` | `DISCORD_REQUIRE_MENTION` (`true`/`false`) |
 | `--access-key` | `HIVEMIND_ACCESS_KEY` |
 | `--password` | `HIVEMIND_PASSWORD` |
 | `--host` | `HIVEMIND_HOST` |
