@@ -317,7 +317,9 @@ class HiveMindDiscordBridge:
         if self._loop is None:
             LOG.warning("Discord loop not running yet, dropping reply")
             return
-        LOG.debug(f"Sending message to Discord channel {channel_id}: {text}")
+        # The length, never the text: replies carry what people asked about,
+        # and a debug log is kept, shipped and read far more widely than the chat.
+        LOG.debug(f"Sending message to Discord channel {channel_id}: {len(text)} characters")
         future = asyncio.run_coroutine_threadsafe(
             self._send(channel_id, text), self._loop
         )
