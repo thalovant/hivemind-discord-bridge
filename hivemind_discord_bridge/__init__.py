@@ -29,7 +29,9 @@ recurring bug across every HiveMind bridge written so far:
 import asyncio
 import re
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime
 from functools import partial
 from typing import Dict, Iterable, List, Optional
 
@@ -62,6 +64,12 @@ SESSION_SCOPES = ("channel", "person")
 #: that anyone could step around by messaging the bot directly is no limit)
 #: and accepts them otherwise.
 DM_POLICIES = ("auto", "allow", "deny")
+
+#: A message older than this (seconds) when the bridge reads it is not
+#: answered. Discord does not replay history on connect, but a gateway
+#: RESUME after an outage delivers the events missed meanwhile, and a reply
+#: to a question asked long before means nothing any more.
+MAX_MESSAGE_AGE = 120
 
 #: What the bridge writes to the termination log when Discord refuses the
 #: bot token, so the platform can ask for a new token instead of restarting
@@ -123,6 +131,7 @@ class HiveMindDiscordBridge:
                  session_scope: str = "channel",
                  health_port: Optional[int] = None,
                  dm_policy: str = "auto",
+                 max_message_age: float = MAX_MESSAGE_AGE,
                  *,
                  client: Optional[HiveMessageBusClient] = None,
                  discord_client: Optional[discord.Client] = None):
@@ -156,6 +165,8 @@ class HiveMindDiscordBridge:
         dm_policy: ``"deny"`` ignores direct messages, ``"allow"`` forwards
             them, ``"auto"`` (default) denies them when ``allowed_channels``
             is set and allows them otherwise.
+        max_message_age: messages sent longer ago than this many seconds
+            are not answered (they were delivered late, after an outage).
         client: pre-built HiveMessageBusClient (tests / advanced setups).
             NOTE: HiveMessageBusClient does NOT open a connection in
             __init__ -- call start() (or connect_hivemind()) to connect.
@@ -180,6 +191,7 @@ class HiveMindDiscordBridge:
         if dm_policy == "auto":
             dm_policy = "deny" if self.allowed_channels is not None else "allow"
         self.dm_policy = dm_policy
+        self.max_message_age = max_message_age
 
         if discord_client is not None:
             self.discord = discord_client
@@ -328,6 +340,8 @@ class HiveMindDiscordBridge:
         """
         if message is None or not message.content:
             return
+        if self._is_stale(message):
+            return
 
         bot_user = getattr(self.discord, "user", None)
         if bot_user is not None and message.author.id == bot_user.id:
@@ -363,6 +377,17 @@ class HiveMindDiscordBridge:
             # errors: name the kind of failure only.
             LOG.warning(f"could not send a message from channel {channel.id} to "
                         f"the hub: {type(error).__name__}")
+
+    def _is_stale(self, message: "discord.Message") -> bool:
+        """Whether ``message`` was sent more than ``max_message_age`` ago."""
+        sent = getattr(message, "created_at", None)
+        if not isinstance(sent, datetime):
+            return False
+        age = time.time() - sent.timestamp()
+        if age <= self.max_message_age:
+            return False
+        LOG.debug(f"not answering a message sent {age:.0f} s ago")
+        return True
 
     def addressed_text(self, message: "discord.Message", is_dm: bool) -> Optional[str]:
         """The text to forward, or ``None`` when the message is not for the bot.
