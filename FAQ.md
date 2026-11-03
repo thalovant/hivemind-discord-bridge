@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Address the CI and documentation review: publish from main only, sign before :latest, pinned audit evidence, qualified claims.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: rejected token reported, Discord and hub never wait for each other, stale messages, localized lines, typing..., long replies, no pings.
 
 # FAQ: hivemind-discord-bridge
 
@@ -29,3 +29,32 @@ This is the Thalovant fork. Upstream's release workflows were removed, so nothin
 ## Does the bot need the Message Content intent?
 
 No, by default. In mention-only mode (`--require-mention`, the default) the bot does not request it: Discord delivers the content of DMs and of messages that mention the bot without it (`HiveMindDiscordBridge.__init__`). Only `--no-require-mention` needs it, and above 100 servers Discord requires verification for it.
+
+## What happens when the bot token is wrong or reset?
+
+When Discord refuses the token, `LoginFailure` (401) at login or the gateway closing with 4004 (authentication failed) after a reset, the bridge closes the Discord client and its hub connection, writes exactly `token_rejected` to `/dev/termination-log` and exits with status 3 (`hivemind_discord_bridge.TokenRejected`, `report_token_rejected`, `HiveMindDiscordBridge._run_discord`). Other gateway close codes (4013 invalid intents, 4014 privileged intent not enabled) still end the process as a crash.
+
+## Why did the bot not answer a message from a few minutes ago?
+
+A message delivered more than 120 s after it was sent is not answered (`HiveMindDiscordBridge._is_stale`, `MAX_MESSAGE_AGE`). Discord does not replay history on connect, but a gateway RESUME after an outage delivers the events missed meanwhile.
+
+## What does the bot say when the hub cannot answer, and in which language?
+
+"I don't know how to answer that." when no skill matched (`complete_intent_failure`), and "Sorry, I can't answer right now." when no answer came within `--reply-timeout` (60 s), the hub could not be reached, or it refused the only question waiting (`hive.policy.denied`). The second is said at most once every 30 s to the same person in a channel. Both are in `HIVEMIND_LANG` when `hivemind_discord_bridge/lines.py` has it (en, fr, es, de, it, pt, nl), else English: a Discord message carries no language of its own.
+
+## Why does the channel show "typing…"?
+
+From the moment a question arrives until the hub answers, the bridge triggers Discord's typing indicator every 8 s (`_expect_answer`, `_keep_typing`). It stops on the answer, on `ovos.utterance.handled`, or at the reply timeout. `--reply-timeout 0` turns it off together with the timeout line.
+
+## How fast does a reply reach Discord?
+
+As soon as the hub's `speak` arrives: `speak()` schedules the send on the Discord loop and returns, and hub sends run on their own thread (`_hub_sender`), so neither waits for the other. With a fake hub and fake channels (`tests/test_latency.py`), five replies at once reach `channel.send` within 0.4 ms of arriving; before this they queued behind each other's sends (up to 1.2 s with a 300 ms Discord).
+
+## Can the bot be made to ping @everyone?
+
+No. Replies are sent with `discord.AllowedMentions.none()` (`NO_PINGS`): a hub answer that echoes "@everyone", a role or a person is shown as text and pings nobody.
+
+## What about a reply longer than a Discord message?
+
+It is sent as several messages, in order, with every character kept (`hivemind_discord_bridge/split.py`, `split_message`); cuts fall on paragraph, line, sentence or word boundaries.
+

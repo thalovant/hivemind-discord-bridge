@@ -1,3 +1,5 @@
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: rejected token reported, Discord and hub never wait for each other, stale messages, localized lines, typing..., long replies, no pings.
+
 # This is the Thalovant fork
 
 The rules in this section win over anything below them, which is upstream's
@@ -116,14 +118,11 @@ casually.
   as long as the process runs.
 - **`connect()` must bound `handshake_max_retries`.** The
   `hivemind-bus-client` floor is `>=1.0.13a1`; that client's own default for
-  `handshake_max_retries` is `None`, meaning retry forever. `connect_hivemind()`
-  currently calls `self.client.connect(site_id=self.site_id)` with no bound,
-  so against a stalled or unreachable hub (down, wrong password) it hangs
-  indefinitely instead of failing fast. This is a standing requirement, not
-  yet met by the code: any change touching `connect_hivemind()` should add an
-  explicit finite `handshake_max_retries`, exposed as a constructor/CLI
-  parameter so operators can tune it, rather than leaving the unbounded
-  default in place.
+  `handshake_max_retries` is `None`, meaning retry forever, which hangs a
+  bridge against a stalled or unreachable hub (down, wrong password).
+  `connect_hivemind()` passes an explicit finite `handshake_max_retries`
+  (`DEFAULT_HANDSHAKE_MAX_RETRIES`, a constructor parameter); any change
+  to it must keep that bound.
 - **The hub owns ACL, not this bridge.** A freshly registered HiveMind client
   is denied every message type until an admin runs `hivemind-core allow-msg
   recognizer_loop:utterance <client_id>` (and usually `speak`). This bridge
@@ -134,18 +133,36 @@ casually.
   follow `--dm-policy`, refused by default when channels are listed); it is
   not a substitute for hub-side
   message-type ACLs.
-- **Rejected credentials must fail fast.** Once `handshake_max_retries` is
+- **Rejected credentials must fail fast.** With `handshake_max_retries`
   bounded (see above), a wrong access key/password turns into a clean
-  failure instead of a bridge that spins forever looking connected. Do not
+  failure instead of a bridge that spins forever looking connected. A
+  Discord token Discord refuses (`LoginFailure`, gateway close 4004) ends
+  the bridge with `token_rejected` in `/dev/termination-log` and exit
+  status 3; keep that path free of retries too. Do not
   add retry/backoff logic on top of `connect()` that defeats this.
 - **Forward upstream responses verbatim.** `handle_speak()` forwards
   `message.data["utterance"]` to Discord unmodified; do not reformat,
-  truncate, or add bridge-specific decoration to hub-authored text. The one
-  exception is the fixed fallback line on `hive.complete_intent_failure`,
-  which is bridge-authored by design because the hub sent no utterance to
-  relay.
+  truncate, or add bridge-specific decoration to hub-authored text. A reply
+  longer than one Discord message is split (`split.py`) with every
+  character kept, never shortened, and sent with `AllowedMentions.none()`
+  so it pings no one. The bridge-authored lines are the ones in
+  `lines.py`, said only when the hub sent nothing to relay: no skill
+  matched (`complete_intent_failure`), or no answer came (reply timeout,
+  hub unreachable, refusal). Keep them short and add a language to every
+  line at once (the Telegram bridge has the same table).
 - **Thread safety.** `speak()` runs on the HiveMind bus's own thread, never
   on the asyncio loop `discord.py`'s `Client` uses. Any new HiveMind →
-  Discord path must go through `asyncio.run_coroutine_threadsafe` the same
-  way (see `speak()` / `_send()`) — a direct `await` from the bus thread
-  will raise or silently no-op depending on timing.
+  Discord path must go through `asyncio.run_coroutine_threadsafe` (or
+  `_on_loop`) the same way (see `speak()` / `_deliver()`) — a direct
+  `await` from the bus thread will raise or silently no-op depending on
+  timing.
+- **Neither side waits for the other.** The bus thread never waits for a
+  Discord call (no `future.result()`): it also delivers every other hub
+  message and the client's keepalive. The Discord loop never calls
+  `client.emit()`: hub sends go through the single `_hub_sender` thread, in
+  order (the client's encrypted transport is not written from two threads,
+  and a blocked loop misses gateway heartbeats). Waiting state (`_waits`,
+  typing, the per-channel send locks, the channel cache) lives on the loop
+  only. `tests/test_latency.py` measures both directions; keep it green.
+- **Never log what people wrote.** `emit()` errors carry the serialized
+  message: log the kind of error only.

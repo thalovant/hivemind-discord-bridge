@@ -1,6 +1,45 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-policy (refused by default when channels are listed).
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: rejected token reported, Discord and hub never wait for each other, stale messages, localized lines, typing..., long replies, no pings.
 
 # Maintenance report: hivemind-discord-bridge
+
+## 2026-11-03: Polish pass (solid, fast)
+
+**Changes** (each its own commit on `polish/solid-fast-replies`, oldest first)
+
+1. A rejected bot token (`LoginFailure` at login, or the gateway closing with 4004 after a reset) closes the Discord client and the hub connection, writes `token_rejected` to `/dev/termination-log` and exits with status 3 (`TokenRejected`, `_run_discord`, `__main__.main`).
+2. Discord and the hub never wait for each other: `speak()` schedules the send and returns (per-channel order kept), hub sends run on one dedicated thread off the Discord loop (no more stalled heartbeats on a slow hub); a failed hub send no longer logs the person's words.
+3. Messages delivered more than 120 s after they were sent (a gateway RESUME replay) are not answered (`_is_stale`).
+4. The bridge's own lines in seven languages from `HIVEMIND_LANG` (`lines.py`, same table as the Telegram bridge); `complete_intent_failure`, which current hubs send, is handled.
+5. "typing…" while the hub thinks; "cannot answer right now" at the reply timeout (60 s, `BRIDGE_REPLY_TIMEOUT`), or at once when the hub is unreachable or refuses the only waiting question; `ovos.utterance.handled` ends a wait quietly. Channels are remembered, so replies stop costing `fetch_channel` calls (AUDIT section 9).
+6. Long replies split at 2000, every character kept (`split.py`); replies never ping anyone (`AllowedMentions.none()`); module docstring says which thread does what.
+7. Docs: README, QUICK_FACTS, FAQ, AUDIT (sections 3, 4 and 9 fixed, 10-17 added), SUGGESTIONS, docs/index.md, AGENTS.md (stale handshake-retries text corrected).
+
+**Rationale:** the owner asked for the live chat bridges to be perfect, solid, fast and polished. The rejected-token state lets the platform ask for a new token instead of restarting forever; the threading change removes head-of-line blocking that grew with every simultaneous person and kept hub slowness off the gateway; the rest closes gaps where a person got silence (no-answer never fired, long replies lost, hub down), a stale answer, or where the bot could be made to ping a whole server.
+
+**Verification**
+
+- `python -m pytest tests -q`: 92 passed on Python 3.14.8 and 3.12 (local venvs). New tests were checked to fail without their change (the old code at `ba1daaa`, or the change reverted in place): non-blocking speak, per-channel order, emit text in logs, stale messages, channel reuse, split, no pings.
+- `ruff check --isolated --select F,E9 .`: clean.
+- Latency, `tests/test_latency.py` (fake hub + fake channels, messages dispatched as discord.py does; send 300 ms; second scenario: hub send 250 ms):
+
+  | Measure | Before (`ba1daaa`) | After |
+  | --- | --- | --- |
+  | speak -> channel.send, five replies at once, median | 601.3 ms | 0.1-0.2 ms |
+  | speak -> channel.send, five replies at once, max | 1202.2 ms | 0.3-0.4 ms |
+  | hub bus thread held per reply | 300.7 ms | 0.1 ms |
+  | reply during a slow hub send | 240.5 ms | 0.2-0.4 ms |
+  | message -> `recognizer_loop:utterance` emitted, median | 0.6 ms | 1.3-1.9 ms (hop to the hub-send thread) |
+  | message -> typing triggered, median | none | 1.8 ms |
+
+- Live check against Discord's API, not committed as a test: a made-up token through the real `discord.Client` gives `TokenRejected` in 0.12 s and leaves the client closed.
+- Image built locally with podman: `--help` lists `--reply-timeout`, runs as uid 10001, refuses to start without a token and names `DISCORD_BOT_TOKEN`, the package imports on a read-only root filesystem.
+- Not verified: a live Discord bot (none exists yet), a live hub, the gateway 4004 path against Discord itself (patched in `tests/test_token.py`), CI on GitHub for this branch (runs on the pull request).
+
+**Transparency report**
+
+- **AI model:** Claude Opus 5.5 (`claude-opus-5-5`), in Claude Code.
+- **Actions taken:** wrote the code changes, the fakes in `tests/conftest.py` and every new test; measured latency on the old and new code; updated these documents.
+- **Oversight:** directed by the repository owner through an orchestrating agent; no human code review yet; the pull request is not merged.
 
 ## 2026-11-03: direct messages follow --dm-policy
 

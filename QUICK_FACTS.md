@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-policy (refused by default when channels are listed).
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: rejected token reported, Discord and hub never wait for each other, stale messages, localized lines, typing..., long replies, no pings.
 
 # Quick facts: hivemind-discord-bridge
 
@@ -14,8 +14,11 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-po
 | Image user | `bridge`, uid 10001; identity in `/home/bridge/.config/hivemind` |
 | Default branch | `main` (upstream: `JarbasHiveMind/hivemind-discord-bridge`, branch `feat/discord-bridge`) |
 | CI | `.github/workflows/ci.yml`: tests on Python 3.12 and 3.14, ruff `F,E9`, image smoke test, publish on `main` |
-| Tests | `tests/`, 47 tests (`python -m pytest tests -q`) |
-| HiveMind message types | sends `recognizer_loop:utterance`; handles `speak`, `hive.complete_intent_failure` |
+| Tests | `tests/`, 92 tests (`python -m pytest tests -q`); `tests/conftest.py` has a fake hub and fake channels |
+| HiveMind message types | sends `recognizer_loop:utterance`; handles `speak`, `complete_intent_failure` (and the older `hive.complete_intent_failure`), `ovos.utterance.handled`, `hive.policy.denied` |
+| Rejected token | `LoginFailure` or gateway close 4004: writes `token_rejected` to `/dev/termination-log`, exit status 3 (`TokenRejected`, `report_token_rejected`) |
+| Bridge's own lines | `hivemind_discord_bridge/lines.py`: en, fr, es, de, it, pt, nl; `HIVEMIND_LANG`, then English |
+| Limits | messages older than 120 s not answered (`MAX_MESSAGE_AGE`); reply timeout 60 s (`REPLY_TIMEOUT`); typing renewed every 8 s; replies split at 2000 (`split.py`); replies sent with `AllowedMentions.none()`; 1024 channels remembered |
 | License | Apache-2.0 |
 
 ## Settings
@@ -28,6 +31,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-po
 | `--no-require-mention` | `DISCORD_REQUIRE_MENTION` |
 | `--session-scope` | `DISCORD_SESSION_SCOPE` (`channel` or `person`) |
 | `--health-port` | `BRIDGE_HEALTH_PORT` |
+| `--reply-timeout` | `BRIDGE_REPLY_TIMEOUT` (seconds, default 60, `0` turns waiting off) |
 | `--access-key` | `HIVEMIND_ACCESS_KEY` (or `_FILE`) |
 | `--password` | `HIVEMIND_PASSWORD` (or `_FILE`) |
 | `--host`, `--port` | `HIVEMIND_HOST`, `HIVEMIND_PORT` |

@@ -1,36 +1,34 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-policy (refused by default when channels are listed).
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: sections 3, 4 and 9 fixed; findings 10-17 added (fixed in this pass, or open and low).
 
 # Audit: hivemind-discord-bridge
 
-Evidence: `python -m pytest tests -q` (42 passed, 2026-11-02, Python 3.12) and reading the code at commit `163a59d61a9c` (the line numbers below refer to it).
+Evidence: `python -m pytest tests -q` (92 passed, 2026-11-03, Python 3.12 and 3.14) and reading the code at commit `9b5a0485b10d` (the line numbers below refer to it). Sections 1-9 were first written against `163a59d61a9c`.
 
 ## 1. Every channel is allowed unless an allow-list is set
 
-- **Where:** `hivemind_discord_bridge/__init__.py:118`.
+- **Where:** `hivemind_discord_bridge/__init__.py:222`.
 - **Finding:** with no `--allowed-channel`, any channel the bot is in reaches the hub.
 - **Impact:** anyone who can message the bot spends the hub's capacity. A managed deployment should always set the allow-list.
 - **Fixed 2026-11-03 (direct messages):** DMs used to bypass the allow-list. They now follow `--dm-policy` (`DISCORD_DM_POLICY`): `auto`, the default, refuses DMs when `--allowed-channel` is given (`HiveMindDiscordBridge.on_message`, `dm_policy`). Tests: `tests/test_bridge.py::test_a_dm_cannot_step_around_the_channel_list` and the four next to it.
 
-## 2. No per-channel or per-person rate limit
+## 2. No per-channel or per-person rate limit in the bridge
 
-- **Where:** `HiveMindDiscordBridge.forward_to_hivemind` (`hivemind_discord_bridge/__init__.py:291`).
-- **Finding:** every addressed message is forwarded immediately.
-- **Impact:** one person can flood the hub.
+- **Where:** `HiveMindDiscordBridge.forward_to_hivemind` (`hivemind_discord_bridge/__init__.py:482`).
+- **Finding:** every addressed message is forwarded immediately. The hub's admission chain can limit per person (a refusal now gets the "cannot answer right now" line, section 13); the bridge itself does not.
+- **Impact:** one person can flood the hub where the hub sets no limit.
 
 ## 3. The fallback reply is English only
 
-- **Where:** `hivemind_discord_bridge/__init__.py:332`.
-- **Finding:** `hive.complete_intent_failure` always answers "I don't know how to answer that", whatever `--lang` is.
+- **Fixed 2026-11-03.** The bridge's lines live in `hivemind_discord_bridge/lines.py` (`bridge_line`; en, fr, es, de, it, pt, nl), chosen from `HIVEMIND_LANG`, then English (`HiveMindDiscordBridge.line`); a Discord message carries no language of its own. Tests: `tests/test_lines.py`.
 
 ## 4. A reply holds the hub's bus thread for up to 10 s
 
-- **Where:** `hivemind_discord_bridge/__init__.py:353` (`future.result(timeout=10)`).
-- **Finding:** `speak()` waits for the Discord send on the HiveMind bus thread, so a slow Discord API delays every other message from the hub.
+- **Fixed 2026-11-03.** `speak()` schedules the send on the Discord loop and returns (`_send_in_order`, per-channel order kept); hub sends run on the `_hub_sender` thread, not on the loop. Measured in `tests/test_latency.py` (fake hub, fake channels, send 300 ms): five replies at once reached `channel.send` after a median 601.3 ms and at most 1202.2 ms before, 0.1 ms and 0.4 ms after; a reply during a 250 ms hub send waited 240.5 ms before, 0.2-0.4 ms after; the bus thread was held 300.7 ms per reply before, 0.1 ms after.
 
 ## 5. Tests do not exercise a live Discord or hub
 
-- **Where:** `tests/test_bridge.py` (module docstring).
-- **Finding:** both sides are mocks; the suite checks wiring and behaviour, not a real handshake or a real Discord API change.
+- **Where:** `tests/conftest.py` (`FakeHub`, `FakeDiscord`, `DiscordLoop`).
+- **Finding:** the fakes run the bridge on a live event loop with a real bus thread, but discord.py's gateway and HTTP client are not exercised; a real Discord API change or a real handshake is not covered.
 
 ## 6. The HiveMind client is prerelease-only
 
@@ -44,12 +42,46 @@ Evidence: `python -m pytest tests -q` (42 passed, 2026-11-02, Python 3.12) and r
 
 ## 8. A reply sent with "ping" turned off is not seen without the privileged intent
 
-- **Where:** `hivemind_discord_bridge/__init__.py:131` (`intents.message_content = not require_mention`).
+- **Where:** `hivemind_discord_bridge/__init__.py:243` (`intents.message_content = not require_mention`).
 - **Finding:** in mention-only mode the bot does not request the message content intent. Discord then delivers the content of DMs and of messages that mention the bot, but a reply whose author turned off the reply ping carries no mention and arrives with empty content, so it is ignored.
 - **Impact:** low; replies ping by default.
 
 ## 9. A channel the bot has not cached costs an API call per reply
 
-- **Where:** `hivemind_discord_bridge/__init__.py:360` (`fetch_channel`).
-- **Finding:** `_send` falls back to `fetch_channel` when `get_channel` misses, on every reply to an uncached channel or DM.
-- **Impact:** low; counts against Discord's rate limit under load.
+- **Fixed 2026-11-03.** The bridge keeps the channel each message came from (`_keep_channel`, `_resolve_channel`, at most `CHANNELS_KEPT` = 1024), so a reply or a typing trigger no longer calls `fetch_channel`. Test: `tests/test_waiting.py::test_a_reply_reuses_the_channel_the_question_came_from`.
+
+## 10. A rejected token was a crash like any other
+
+- **Fixed 2026-11-03.** `LoginFailure`, and the gateway closing with 4004 after a token reset, ended the process with a traceback the platform could not tell from a crash worth restarting. The bridge now writes `token_rejected` to `/dev/termination-log` and exits with status 3 (`_run_discord`, `__main__.main`). Tests: `tests/test_token.py`.
+
+## 11. The no-answer line never fired against a current hub
+
+- **Fixed 2026-11-03.** The bridge listened only for `hive.complete_intent_failure`; HiveMind-core relays ovos-core's `complete_intent_failure`. Both are handled (`INTENT_FAILURE_TYPES`). Test: `tests/test_lines.py::test_current_and_older_hubs_no_answer_is_handled`.
+
+## 12. A failed hub send logged the person's words, and a slow one stalled the gateway
+
+- **Fixed 2026-11-03.** `HiveMessageBusClient.emit` raises `RuntimeError("... Failed to emit : <serialized message>")` when the hub is down, and it ran on the Discord loop, so a slow hub socket also held up heartbeats. It now runs on `_hub_sender`, a failure is logged by kind only and the person is told at once (`on_message`, `_give_up`). Test: `tests/test_bridge.py::test_a_failed_hub_send_never_logs_the_text`.
+
+## 13. A refusal by the hub names no channel
+
+- **Where:** `HiveMindDiscordBridge.handle_denied`, `_denied` (`hivemind_discord_bridge/__init__.py:543`, `:715`).
+- **Finding:** `hive.policy.denied` carries no context from the refused message, so the bridge tells the person at once only when exactly one question is waiting; otherwise they hear "cannot answer right now" at the reply timeout (60 s). Status: open, low; needs the hub to echo the refused message's context (SUGGESTIONS.md).
+
+## 14. Long replies were lost; replies could ping everyone
+
+- **Fixed 2026-11-03.** A reply over 2000 characters failed whole; it is now split (`hivemind_discord_bridge/split.py`). A reply echoing "@everyone", a role or a user pinged them; replies are sent with `AllowedMentions.none()` (`NO_PINGS`). Tests: `tests/test_split.py`.
+
+## 15. A typing trigger can land after the reply
+
+- **Where:** `_keep_typing`, `_send_typing` (`hivemind_discord_bridge/__init__.py:738`, `:747`).
+- **Finding:** typing is its own request and replies never wait for it; if Discord applies an in-flight trigger after the message, "typing…" shows for a few seconds after the answer. Status: open, low, by choice (waiting would delay every fast reply by a round trip).
+
+## 16. Other fatal gateway closes are plain crashes
+
+- **Where:** `HiveMindDiscordBridge._run_discord`.
+- **Finding:** 4014 (privileged intent not enabled in the Developer Portal, with `--no-require-mention`) and 4013 (invalid intents) end the process with a traceback and a restart, which cannot help. Status: open, low (SUGGESTIONS.md).
+
+## 17. The default session scope is the channel
+
+- **Where:** `hivemind_discord_bridge/__init__.py:167` (`session_scope: str = "channel"`).
+- **Finding:** the bridge contract names `person` as the default; this bridge defaults to `channel` and the platform sets `DISCORD_SESSION_SCOPE`. Status: open, by design until the platform changes its default.
