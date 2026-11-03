@@ -77,3 +77,43 @@ def test_a_reply_never_pings_anyone():
     mentions = kwargs["allowed_mentions"]
     assert mentions.everyone is False
     assert mentions.users is False and mentions.roles is False
+
+
+def test_splitting_stays_linear_in_the_length():
+    """Walked by offset: copying the rest after every piece made 15 MB take seconds."""
+    import time
+
+    text = ("word " * 199 + "\n") * 16000
+    started = time.monotonic()
+    pieces = split_message(text)
+    assert time.monotonic() - started < 1.0
+    assert "".join(pieces) == text
+
+
+def test_an_interior_whitespace_run_longer_than_a_piece_is_shortened_not_sent_empty():
+    """Discord refuses an empty message: the run loses only what no message could hold."""
+    text = "before" + " " * 5000 + "after"
+    pieces = split_message(text)
+    assert all(piece.strip() for piece in pieces)
+    assert pieces[0].startswith("before") and pieces[-1].endswith("after")
+    assert "".join(pieces).replace(" ", "") == "beforeafter"
+
+
+def test_a_reply_discord_refuses_is_followed_by_the_cannot_answer_line():
+    """The question stopped waiting when its reply came; if the reply cannot go, say so."""
+    from hivemind_discord_bridge.lines import LINES, UNAVAILABLE
+
+    hub = FakeHub(answer=lambda message: "the answer")
+    fake = FakeDiscord()
+    channel = fake.channel(42)
+    channel.refuse = {"the answer"}
+    bridge = HiveMindDiscordBridge(client=hub, discord_client=fake, reply_timeout=30)
+    bridge.connect_hivemind()
+    loop = DiscordLoop(bridge)
+    try:
+        loop.dispatch(text_message("what time is it", channel))
+        assert wait_for(lambda: [c for _, c, _ in channel.done] == [LINES["en"][UNAVAILABLE]],
+                        timeout=5)
+    finally:
+        loop.stop()
+        hub.close()

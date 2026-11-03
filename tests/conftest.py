@@ -30,9 +30,13 @@ class FakeChannel:
         self.done: List[tuple] = []  # like sent, once Discord has answered
         self.typed: List[float] = []
         self.fail_typing = False
+        self.refuse: set = set()  # contents Discord answers with an error
 
     async def send(self, content=None, **kwargs):
         self.sent.append((time.monotonic(), content, kwargs))
+        if content in self.refuse:
+            raise discord.HTTPException(MagicMock(status=403, reason="Forbidden"),
+                                        {"code": 50013, "message": "Missing Permissions"})
         if self.latency:
             await asyncio.sleep(self.latency)
         self.done.append((time.monotonic(), content, kwargs))

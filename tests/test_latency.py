@@ -83,8 +83,10 @@ def test_a_slow_hub_send_does_not_hold_up_replies():
     finally:
         loop.stop()
         hub.close()
-    sent_at, cid = hub.replies[0]
-    numbers = {"outbound_first": fake.channels[cid].sent[0][0] - sent_at,
+    (first_at, first_cid), (second_at, second_cid) = hub.replies[:2]
+    numbers = {"outbound_first": fake.channels[first_cid].sent[0][0] - first_at,
+               "outbound_second": fake.channels[second_cid].sent[0][0] - second_at,
                "bus_held_max": max(hub.held)}
     _report("slow-hub-socket", numbers)
     assert numbers["outbound_first"] < LIMIT, "a reply waited for a hub send on the loop"
+    assert numbers["outbound_second"] < LIMIT, "the second reply waited"

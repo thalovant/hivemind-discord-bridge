@@ -365,3 +365,19 @@ def test_a_failed_hub_send_never_logs_the_text(monkeypatch):
     asyncio.run(bridge.on_message(_fake_message(text="my secret", is_dm=True)))
     assert any("RuntimeError" in line for line in lines)
     assert "my secret" not in "\n".join(lines)
+
+
+def test_the_bridge_builds_the_real_hub_client_without_connecting(monkeypatch, tmp_path):
+    """Every other test injects a mock client; the real constructor must work too."""
+    from hivemind_bus_client import HiveMessageBusClient
+
+    from hivemind_discord_bridge import HiveMindDiscordBridge
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    bridge = HiveMindDiscordBridge(token="t", key="k", password="p",
+                                   host="ws://127.0.0.1", port=5678,
+                                   discord_client=MagicMock())
+    assert type(bridge.client) is HiveMessageBusClient
+    assert not bridge._connected.is_set()
+    assert not getattr(bridge.client, "started_running", False)

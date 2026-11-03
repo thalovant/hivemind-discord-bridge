@@ -180,11 +180,11 @@ every start is refused.
   as they arrive: the hub's bus thread never waits for Discord, and the
   Discord loop never waits for the hub. Replies to one channel keep their
   order; a reply longer than Discord's 2000 characters goes out as
-  several messages, every character kept; a reply never pings anyone
+  several messages, in order; a reply never pings anyone
   (`AllowedMentions.none()`), whatever `@everyone` or mention it echoes.
 - Shows "typing…" from the moment a question arrives until the hub
   answers. With no answer within `--reply-timeout` (60 s), or at once when
-  the hub cannot be reached or refuses the only question waiting, it says
+  the hub cannot be reached or refuses the question just asked, it says
   it cannot answer right now. When no skill matches
   (`complete_intent_failure`) it says it does not know. These lines are
   in `HIVEMIND_LANG` when there is one for it, else English

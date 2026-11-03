@@ -86,10 +86,19 @@ def test_an_unwritable_termination_log_is_ignored(tmp_path):
     bridge_module.report_token_rejected(str(tmp_path / "missing-dir" / "log"))
 
 
-def test_a_rejected_token_frees_the_health_port(discord_fails):
+def test_a_rejected_token_frees_the_health_port(discord_fails, monkeypatch):
     discord_fails["login"] = discord.LoginFailure("Improper token has been passed.")
+    servers = []
+    real_health_server = bridge_module.HealthServer
+
+    def recording_health_server(*args, **kwargs):
+        servers.append(real_health_server(*args, **kwargs))
+        return servers[-1]
+
+    monkeypatch.setattr(bridge_module, "HealthServer", recording_health_server)
     hub = MagicMock(name="HiveMessageBusClient")
     bridge = HiveMindDiscordBridge(token="secret-token", client=hub, health_port=0)
     with pytest.raises(TokenRejected):
         bridge.start()
     assert bridge._health is None
+    assert servers and servers[0]._server.socket.fileno() == -1, "the health port stayed bound"

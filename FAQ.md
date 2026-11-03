@@ -40,7 +40,7 @@ A message delivered more than 120 s after it was sent is not answered (`HiveMind
 
 ## What does the bot say when the hub cannot answer, and in which language?
 
-"I don't know how to answer that." when no skill matched (`complete_intent_failure`), and "Sorry, I can't answer right now." when no answer came within `--reply-timeout` (60 s), the hub could not be reached, or it refused the only question waiting (`hive.policy.denied`). Every question waits on its own: each unanswered one gets its own line at its own timeout, and a reply ends only the oldest waiting question of its session (an answer that names no session, the oldest in the channel). Both are in `HIVEMIND_LANG` when `hivemind_discord_bridge/lines.py` has it (en, fr, es, de, it, pt, nl), else English: a Discord message carries no language of its own.
+"I don't know how to answer that." when no skill matched (`complete_intent_failure`), and "Sorry, I can't answer right now." when no answer came within `--reply-timeout` (60 s), the hub could not be reached, or it refused the question (`hive.policy.denied`, pinned on a question only when it is the one asked in the last 5 s), or Discord refused the hub's reply. Every question waits on its own: each unanswered one gets its own line at its own timeout, and a reply ends only the oldest waiting question of its session (an answer that names no session, the oldest in the channel). Both are in `HIVEMIND_LANG` when `hivemind_discord_bridge/lines.py` has it (en, fr, es, de, it, pt, nl), else English: a Discord message carries no language of its own.
 
 ## Why does the channel show "typing…"?
 
@@ -56,7 +56,7 @@ No. Replies are sent with `discord.AllowedMentions.none()` (`NO_PINGS`): a hub a
 
 ## What about a reply longer than a Discord message?
 
-It is sent as several messages, in order, with every character kept (`hivemind_discord_bridge/split.py`, `split_message`); cuts fall on paragraph, line, sentence or word boundaries; only a piece with no such boundary in its second half (a word longer than the limit) is cut mid-word.
+It is sent as several messages, in order, with every character kept except a whitespace run longer than a whole message, which Discord could not send (`hivemind_discord_bridge/split.py`, `split_message`); cuts fall on paragraph, line, sentence or word boundaries; only a piece with no such boundary in its second half (a word longer than the limit) is cut mid-word.
 
 ## The log says the hub does not allow this bridge to send `recognizer_loop:utterance`
 

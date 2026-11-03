@@ -367,3 +367,68 @@ def test_an_answer_with_no_session_ends_only_the_oldest_wait(running):
     left = [q.author_id for queue in bridge.bridge._pending.values() for q in queue]
     assert left == [2]
 
+
+def test_in_a_shared_channel_a_second_sentence_ends_no_other_wait(running):
+    """Channel scope (one session): Alice's answer in two speaks leaves Bob's wait alone."""
+    bridge = running(reply_timeout=30)
+    channel = _shared(bridge, 910)
+    _in_channel(bridge, channel, author_id=1)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 1)
+    _in_channel(bridge, channel, author_id=2)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 2)
+    _, alice = bridge.hub.emitted[0]
+    for sentence in ("It is noon.", "Have a nice lunch."):
+        bridge.hub.send("speak", {"utterance": sentence}, dict(alice.context))
+    bridge.hub.send("ovos.utterance.handled", {}, dict(alice.context))
+    assert wait_for(lambda: len(bridge.sent(910)) == 2)
+    time.sleep(0.1)
+    left = [q.author_id for queue in bridge.bridge._pending.values() for q in queue]
+    assert left == [2], "Bob's wait was ended by Alice's second sentence"
+
+
+def test_an_answer_for_a_session_with_nothing_waiting_ends_no_wait(running):
+    """However late (the session long forgotten), it never ends someone else's wait."""
+    bridge = running(reply_timeout=30, session_scope="person")
+    channel = _shared(bridge, 911)
+    _in_channel(bridge, channel, author_id=2)
+    assert wait_for(lambda: bridge.hub.emitted)
+    bridge.hub.send("speak", {"utterance": "very late, for someone"},
+                    {"channel_id": 911, "session": {"session_id": "discord-911-7"}})
+    assert wait_for(lambda: bridge.sent(911) == ["very late, for someone"])
+    time.sleep(0.05)
+    assert waiting(bridge.bridge, 911) == 1
+
+
+def test_a_refusal_long_after_the_only_question_is_not_pinned_on_it(running, monkeypatch):
+    """Refusals come at admission: one arriving later is not about this question."""
+    monkeypatch.setattr(bridge_module, "REFUSAL_WINDOW", 0.2)
+    bridge = running(reply_timeout=30)
+    bridge.ask()
+    assert wait_for(lambda: bridge.hub.emitted)
+    time.sleep(0.4)
+    bridge.hub.send("hive.policy.denied", {"denied_type": "recognizer_loop:utterance"}, {})
+    time.sleep(0.3)
+    assert bridge.sent() == []
+    assert waiting(bridge.bridge) == 1
+
+
+def test_a_question_that_got_too_old_in_the_hub_queue_is_not_sent(running):
+    """Fresh when it arrived, but older than max_message_age once the hub socket is free."""
+    hub = FakeHub(emit_delay=0.8)
+    bridge = running(hub, reply_timeout=30, max_message_age=0.5)
+    bridge.ask(channel_id=1, author_id=1)
+    bridge.ask(channel_id=2, author_id=2)
+    assert wait_for(lambda: len(hub.emitted) == 1, timeout=3)
+    time.sleep(1.0)  # long enough for the second to have been sent, had it gone
+    assert [message.context["channel_id"] for _, message in hub.emitted] == [1]
+
+
+def test_replies_queued_for_one_channel_are_capped(running, monkeypatch):
+    monkeypatch.setattr(bridge_module, "SENDS_PER_CHANNEL_MAX", 2)
+    bridge = running(reply_timeout=0)
+    channel = bridge.fake.channel(920, latency=0.3)
+    bridge.channels[920] = channel
+    for n in range(5):
+        bridge.bridge.speak(f"reply {n}", 920)
+    time.sleep(1.0)
+    assert bridge.sent(920) == ["reply 0", "reply 1"]

@@ -146,8 +146,10 @@ casually.
 - **Forward upstream responses verbatim.** `handle_speak()` forwards
   `message.data["utterance"]` to Discord unmodified; do not reformat,
   truncate, or add bridge-specific decoration to hub-authored text. A reply
-  longer than one Discord message is split (`split.py`) with every
-  character kept, never shortened, and sent with `AllowedMentions.none()`
+  longer than one Discord message is split (`split.py`) in order, never
+  shortened (only a whitespace run longer than a whole message, which
+  Discord could not send, loses what does not fit), and sent with
+  `AllowedMentions.none()`
   so it pings no one. The bridge-authored lines are the ones in
   `lines.py`, said only when the hub sent nothing to relay: no skill
   matched (`complete_intent_failure`), or no answer came (reply timeout,
