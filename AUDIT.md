@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: sections 3, 4 and 9 fixed; findings 10-18 added (fixed in this pass, or open and low).
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: sections 3, 4 and 9 fixed; findings 10-19 added (fixed in this pass, or open and low), review findings in 19.
 
 # Audit: hivemind-discord-bridge
 
@@ -89,3 +89,13 @@ Evidence: `python -m pytest tests -q` (92 passed, 2026-11-03, Python 3.12 and 3.
 ## 18. Every start warned about hub permissions
 
 - **Fixed 2026-11-03.** `start()` logged a WARNING that a fresh client is denied every message type until an admin runs `hivemind-core allow-msg ...`. On a managed hub the platform grants `recognizer_loop:utterance`, so the line was false and sent readers of the log the wrong way. The hint is now logged once, as a WARNING, only when the hub refuses an utterance with `hive.policy.denied` code `acl_disallowed_type` (`HiveMindDiscordBridge.handle_denied`, `ACL_DISALLOWED_TYPE`). Tests: `tests/test_acl_hint.py`.
+
+## 19. Findings carried over from the Telegram bridge's review
+
+- **Fixed 2026-11-03**, from the automated review of thalovant/hivemind-telegram-bridge#3, where this bridge has the same code:
+  - The "cannot answer" throttle was per session, so in a channel-scope channel the second person was not told; it is per (channel, person) (`_say_unavailable`). Test: `tests/test_waiting.py::test_each_person_in_a_shared_channel_is_told_when_the_hub_is_down`.
+  - A late answer to a question already given up on ended every other wait in the channel; ended waits are remembered for 10 min (`_ended`, `ENDED_KEPT`). Test: `test_a_late_answer_to_an_expired_question_leaves_other_waits_alone`.
+  - `stop()` closed the Discord client under replies being sent; `_drain_and_close` gives them `SEND_DRAIN` (5 s) first. Test: `test_stopping_lets_a_reply_being_sent_finish`. Only `stop()` drains: a SIGTERM still ends the process at once (SUGGESTIONS.md).
+  - A rejected token left the health port bound; it is released (`start`). Test: `tests/test_token.py::test_a_rejected_token_frees_the_health_port`.
+  - Negative or NaN `max_message_age` and negative or non-finite `reply_timeout` are refused; click's `FloatRange` let `inf` and `nan` through (`__init__`, `__main__._finite`). Tests: `test_nonsense_timings_are_refused`, `tests/test_cli.py::test_the_reply_timeout_defaults_to_a_minute_and_must_be_a_number`.
+- **Not applicable here:** handler blocking (discord.py runs each `on_message` as its own task), per-person languages (a Discord message carries none), flood-control budget (discord.py waits out 429s itself).

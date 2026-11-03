@@ -32,6 +32,12 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: reply-off-the-bus
 - **Proposal:** use the guild's `preferred_locale` when the server set one other than the default, behind a flag (most servers keep `en-US`, which would override a French hub).
 - **Impact:** low.
 
+## Drain on SIGTERM
+
+- **Problem:** AUDIT.md section 19: replies being sent are drained on `stop()`, but a container stop sends SIGTERM, which ends the process at once.
+- **Proposal:** in `__main__.main`, turn SIGTERM into `bridge.stop()` (a signal handler that calls it from the main thread), so the 5 s drain runs on every stop.
+- **Impact:** low to medium; replies in flight during a rollout are not cut.
+
 ## Reproducible images
 
 - **Problem:** AUDIT.md sections 6 and 7.

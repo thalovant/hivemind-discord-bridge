@@ -40,7 +40,7 @@ A message delivered more than 120 s after it was sent is not answered (`HiveMind
 
 ## What does the bot say when the hub cannot answer, and in which language?
 
-"I don't know how to answer that." when no skill matched (`complete_intent_failure`), and "Sorry, I can't answer right now." when no answer came within `--reply-timeout` (60 s), the hub could not be reached, or it refused the only question waiting (`hive.policy.denied`). The second is said at most once every 30 s to the same person in a channel. Both are in `HIVEMIND_LANG` when `hivemind_discord_bridge/lines.py` has it (en, fr, es, de, it, pt, nl), else English: a Discord message carries no language of its own.
+"I don't know how to answer that." when no skill matched (`complete_intent_failure`), and "Sorry, I can't answer right now." when no answer came within `--reply-timeout` (60 s), the hub could not be reached, or it refused the only question waiting (`hive.policy.denied`). The second is said at most once every 30 s to the same person in a channel (each person in a shared channel is told). Both are in `HIVEMIND_LANG` when `hivemind_discord_bridge/lines.py` has it (en, fr, es, de, it, pt, nl), else English: a Discord message carries no language of its own.
 
 ## Why does the channel show "typing…"?
 
