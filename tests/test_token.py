@@ -84,3 +84,12 @@ def test_main_writes_token_rejected_and_exits_non_zero(monkeypatch, tmp_path):
 
 def test_an_unwritable_termination_log_is_ignored(tmp_path):
     bridge_module.report_token_rejected(str(tmp_path / "missing-dir" / "log"))
+
+
+def test_a_rejected_token_frees_the_health_port(discord_fails):
+    discord_fails["login"] = discord.LoginFailure("Improper token has been passed.")
+    hub = MagicMock(name="HiveMessageBusClient")
+    bridge = HiveMindDiscordBridge(token="secret-token", client=hub, health_port=0)
+    with pytest.raises(TokenRejected):
+        bridge.start()
+    assert bridge._health is None

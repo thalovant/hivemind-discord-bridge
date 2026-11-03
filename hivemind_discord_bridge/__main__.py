@@ -9,6 +9,7 @@ read it. Secrets additionally accept a ``*_FILE`` variable naming a file
 that holds the value, the convention for secrets mounted into a container.
 A flag wins over its environment variable, and the variable over its file.
 """
+import math
 import os
 
 import click
@@ -47,6 +48,13 @@ def _from_file(value, variable):
             return handle.read().strip()
     except OSError as error:
         raise click.UsageError(f"{variable}_FILE: cannot read {path}: {error.strerror}") from None
+
+
+def _finite(ctx, param, value):
+    """FloatRange lets inf and nan through; a timeout must be a real number."""
+    if value is not None and not math.isfinite(value):
+        raise click.BadParameter(f"{value!r} is not a finite number of seconds")
+    return value
 
 
 def _channel_ids(ctx, param, values):
@@ -90,6 +98,7 @@ def _channel_ids(ctx, param, values):
              help="serve /healthz and /readyz on this port (default: off) "
                   "[BRIDGE_HEALTH_PORT]")
 @click.option("--reply-timeout", type=click.FloatRange(min=0), default=REPLY_TIMEOUT,
+             callback=_finite,
              envvar="BRIDGE_REPLY_TIMEOUT", show_default=True,
              help="seconds to wait for the hub's answer, showing typing..., before "
                   "saying it cannot answer right now; 0 turns this off "

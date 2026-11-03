@@ -176,3 +176,67 @@ def test_a_reply_reuses_the_channel_the_question_came_from(running):
     _answer_last(bridge.hub)
     assert wait_for(lambda: bridge.sent(77) == ["it is noon"])
     assert bridge.fake.fetched == []
+
+
+def _in_channel(bridge, channel, author_id, text="<@999> what time is it"):
+    return bridge.loop.dispatch(text_message(text, channel, author_id=author_id,
+                                             mentions=[bridge.fake.user]))
+
+
+def test_a_late_answer_to_an_expired_question_leaves_other_waits_alone(running):
+    """Person scope: Alice's question timed out; its late answer must not end Bob's wait."""
+    bridge = running(reply_timeout=0.4, session_scope="person")
+    channel = bridge.fake.channel(500, dm=False)
+    bridge.channels[500] = channel
+    _in_channel(bridge, channel, author_id=1)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 1)
+    _, alice = bridge.hub.emitted[-1]
+    assert wait_for(lambda: bridge.sent(500), timeout=2)  # Alice's wait ended
+    _in_channel(bridge, channel, author_id=2)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 2)
+    bridge.hub.send("speak", {"utterance": "late for alice"}, dict(alice.context))
+    assert wait_for(lambda: "late for alice" in bridge.sent(500))
+    time.sleep(0.05)
+    assert any(key[0] == 500 for key in bridge.bridge._waits), "Bob's wait was ended"
+
+
+def test_each_person_in_a_shared_channel_is_told_when_the_hub_is_down(running):
+    """Channel scope: one session for the channel, but the line is throttled per person."""
+    hub = FakeHub()
+
+    def down(_):
+        raise RuntimeError("Can not send messages before opening the websocket connection")
+
+    hub.emit = down
+    bridge = running(hub, reply_timeout=30)
+    channel = bridge.fake.channel(600, dm=False)
+    bridge.channels[600] = channel
+    _in_channel(bridge, channel, author_id=1)
+    assert wait_for(lambda: len(bridge.sent(600)) == 1, timeout=2)
+    _in_channel(bridge, channel, author_id=2)
+    assert wait_for(lambda: len(bridge.sent(600)) == 2, timeout=2)
+    _in_channel(bridge, channel, author_id=1, text="<@999> again")
+    time.sleep(0.3)
+    assert len(bridge.sent(600)) == 2, "the same person was told twice within 30 s"
+
+
+@pytest.mark.parametrize("setting", [{"reply_timeout": float("inf")}, {"reply_timeout": float("nan")},
+                                     {"reply_timeout": -1}, {"max_message_age": -1},
+                                     {"max_message_age": float("nan")}])
+def test_nonsense_timings_are_refused(setting):
+    with pytest.raises(ValueError):
+        HiveMindDiscordBridge(client=FakeHub(), discord_client=FakeDiscord(), **setting)
+
+
+def test_stopping_lets_a_reply_being_sent_finish(running):
+    """A long reply is several sends; the client closes only after they are done."""
+    hub = FakeHub(answer=lambda message: "\n".join("x" * 1900 for _ in range(3)))
+    bridge = running(hub, reply_timeout=0)
+    channel = bridge.fake.channel(700, latency=0.3)
+    bridge.channels[700] = channel
+    bridge.loop.dispatch(text_message("tell me", channel))
+    assert wait_for(lambda: channel.sent, timeout=5)
+    bridge.bridge.stop()
+    assert wait_for(lambda: bridge.fake.closed_at is not None, timeout=5)
+    assert len(channel.done) == 3
+    assert bridge.fake.closed_at >= channel.done[-1][0]

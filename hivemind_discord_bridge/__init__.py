@@ -40,6 +40,7 @@ Threads, and why neither side waits for the other:
   and one at a time, in order.
 """
 import asyncio
+import math
 import re
 import threading
 import time
@@ -107,6 +108,11 @@ TYPING_EVERY = 8.0
 UNAVAILABLE_EVERY = 30.0
 #: Replies mention no one: not @everyone, @here, a role, nor a person.
 NO_PINGS = discord.AllowedMentions.none()
+#: When the bridge stops, replies already being sent get this long to finish.
+SEND_DRAIN = 5.0
+#: How long a question the bridge stopped waiting for is remembered, so a
+#: late answer to it is recognised and does not end other people's waits.
+ENDED_KEPT = 600.0
 #: How many channels' objects are kept, so a reply or "typing…" does not
 #: cost a fetch_channel API call.
 CHANNELS_KEPT = 1024
@@ -236,7 +242,12 @@ class HiveMindDiscordBridge:
         if dm_policy == "auto":
             dm_policy = "deny" if self.allowed_channels is not None else "allow"
         self.dm_policy = dm_policy
+        if not max_message_age >= 0:  # also refuses NaN
+            raise ValueError(f"max_message_age must be >= 0, not {max_message_age!r}")
         self.max_message_age = max_message_age
+        if not (math.isfinite(reply_timeout) and reply_timeout >= 0):
+            raise ValueError("reply_timeout must be a finite number of seconds >= 0, "
+                             f"not {reply_timeout!r}")
         self.reply_timeout = reply_timeout
 
         if discord_client is not None:
@@ -280,7 +291,9 @@ class HiveMindDiscordBridge:
         # on the Discord loop.
         self._waits: Dict[Tuple[int, str], "_Wait"] = {}
         self._typing_at: Dict[int, float] = {}
-        self._unavailable_at: Dict[Tuple[int, str], float] = {}
+        self._unavailable_at: Dict[Tuple[int, Optional[int]], float] = {}
+        self._ended: Dict[Tuple[int, str], float] = {}
+        self._sending: Set[asyncio.Task] = set()
         self._channels: "OrderedDict[int, object]" = OrderedDict()
         self._background: Set[asyncio.Task] = set()
         self._told_about_acl = False  # bus thread only
@@ -332,6 +345,9 @@ class HiveMindDiscordBridge:
                 self.client.close()
             except Exception:
                 LOG.exception("error closing HiveMind client")
+            if self._health is not None:
+                self._health.stop()
+                self._health = None
             self._started = False
             self._connected.clear()
             raise TokenRejected("Discord rejected the bot token")
@@ -349,9 +365,16 @@ class HiveMindDiscordBridge:
                 await self.discord.close()
 
     def stop(self) -> None:
-        """Stop the Discord client and close the HiveMind connection."""
+        """Stop the Discord client and close the HiveMind connection.
+
+        Replies already being sent get ``SEND_DRAIN`` seconds to finish
+        before the Discord client closes.
+        """
         if self._loop is not None and not self._loop.is_closed():
-            asyncio.run_coroutine_threadsafe(self.discord.close(), self._loop)
+            try:
+                asyncio.run_coroutine_threadsafe(self._drain_and_close(), self._loop)
+            except RuntimeError:  # the loop closed in between
+                pass
         try:
             self.client.close()
         except Exception:
@@ -361,6 +384,12 @@ class HiveMindDiscordBridge:
         if self._health is not None:
             self._health.stop()
             self._health = None
+
+    async def _drain_and_close(self) -> None:
+        pending = [task for task in self._sending if not task.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=SEND_DRAIN)
+        await self.discord.close()
 
     def ready(self) -> bool:
         """Whether a message can go end to end right now.
@@ -425,7 +454,8 @@ class HiveMindDiscordBridge:
         sent = asyncio.get_running_loop().run_in_executor(
             self._hub_sender, self.forward_to_hivemind, text, message.author, channel.id)
         session_id = self.session_id(channel.id, message.author)
-        self._expect_answer(channel.id, session_id)
+        author_id = getattr(message.author, "id", None)
+        self._expect_answer(channel.id, session_id, author_id)
         try:
             await sent
         except Exception as error:
@@ -433,7 +463,7 @@ class HiveMindDiscordBridge:
             # errors: name the kind of failure only.
             LOG.warning(f"could not send a message from channel {channel.id} to "
                         f"the hub: {type(error).__name__}")
-            self._give_up(channel.id, session_id)
+            self._give_up(channel.id, session_id, author_id)
 
     def _is_stale(self, message: "discord.Message") -> bool:
         """Whether ``message`` was sent more than ``max_message_age`` ago."""
@@ -614,6 +644,9 @@ class HiveMindDiscordBridge:
         if entry is None:
             entry = self._channel_sends[channel_id] = [asyncio.Lock(), 0]
         entry[1] += 1
+        task = asyncio.current_task()
+        if task is not None:
+            self._sending.add(task)
         try:
             async with entry[0]:
                 await self._send(channel_id, text)
@@ -621,6 +654,8 @@ class HiveMindDiscordBridge:
             entry[1] -= 1
             if entry[1] == 0:
                 self._channel_sends.pop(channel_id, None)
+            if task is not None:
+                self._sending.discard(task)
         # Discord clears "typing…" when the bot's message arrives: renew it
         # for anyone in this channel still waiting for an answer.
         self._typing_at.pop(channel_id, None)
@@ -658,7 +693,8 @@ class HiveMindDiscordBridge:
     # waiting for the hub: "typing…", then a line if no answer comes
     # (all on the Discord loop)
     # ------------------------------------------------------------------
-    def _expect_answer(self, channel_id: int, session_id: str) -> None:
+    def _expect_answer(self, channel_id: int, session_id: str,
+                       author_id: Optional[int] = None) -> None:
         """Show "typing…" in ``channel_id`` until the hub answers ``session_id``.
 
         If no answer comes within ``reply_timeout``, the person is told the
@@ -674,6 +710,7 @@ class HiveMindDiscordBridge:
             wait = self._waits[key] = _Wait()
             wait.task = loop.create_task(self._wait_for_answer(key, wait))
         wait.deadline = loop.time() + self.reply_timeout
+        wait.author_id = author_id  # the line, if it comes, answers the latest question
         wait.wake.set()
 
     async def _wait_for_answer(self, key: Tuple[int, str], wait: "_Wait") -> None:
@@ -694,7 +731,7 @@ class HiveMindDiscordBridge:
                 LOG.info(f"no answer from the hub for channel {channel_id} in "
                          f"{self.reply_timeout:g} s")
                 self._forget(key, wait)
-                await self._say_unavailable(channel_id, session_id)
+                await self._say_unavailable(channel_id, wait.author_id)
         finally:
             self._forget(key, wait)
 
@@ -702,6 +739,10 @@ class HiveMindDiscordBridge:
         wait.answered = True
         if self._waits.get(key) is wait:
             del self._waits[key]
+            now = time.monotonic()
+            for old in [k for k, at in self._ended.items() if now - at >= ENDED_KEPT]:
+                del self._ended[old]
+            self._ended[key] = now
         if not any(channel == key[0] for channel, _ in self._waits):
             self._typing_at.pop(key[0], None)
 
@@ -710,10 +751,16 @@ class HiveMindDiscordBridge:
 
         A session the bridge is not waiting for (an answer without one, or
         a hub that rewrote it) ends every wait in the channel: a "cannot
-        answer" line after an answer is worse than none.
+        answer" line after an answer is worse than none. A late or second
+        answer to a question whose wait already ended ends nothing else.
         """
         key = (channel_id, session_id)
-        keys = [key] if key in self._waits else [k for k in self._waits if k[0] == channel_id]
+        if key in self._waits:
+            keys = [key]
+        elif session_id is not None and key in self._ended:
+            keys = []
+        else:
+            keys = [k for k in self._waits if k[0] == channel_id]
         for done in keys:
             wait = self._waits.get(done)
             if wait is not None:
@@ -722,17 +769,18 @@ class HiveMindDiscordBridge:
 
     def _denied(self) -> None:
         if len(self._waits) == 1:
-            (channel_id, session_id), = self._waits
-            self._give_up(channel_id, session_id)
+            (key, wait), = self._waits.items()
+            self._give_up(key[0], key[1], wait.author_id)
 
-    def _give_up(self, channel_id: int, session_id: str) -> None:
+    def _give_up(self, channel_id: int, session_id: str, author_id: Optional[int]) -> None:
         """The hub will not answer this question: stop waiting and say so now."""
         self._answered(channel_id, session_id)
-        self._spawn(self._say_unavailable(channel_id, session_id))
+        self._spawn(self._say_unavailable(channel_id, author_id))
 
-    async def _say_unavailable(self, channel_id: int, session_id: str) -> None:
+    async def _say_unavailable(self, channel_id: int, author_id: Optional[int]) -> None:
+        """Say "cannot answer right now" to ``author_id`` in ``channel_id``, at most every 30 s."""
         loop = asyncio.get_running_loop()
-        key, now = (channel_id, session_id), loop.time()
+        key, now = (channel_id, author_id), loop.time()
         for old in [k for k, at in self._unavailable_at.items() if now - at >= UNAVAILABLE_EVERY]:
             del self._unavailable_at[old]
         if key in self._unavailable_at:
@@ -788,13 +836,14 @@ class HiveMindDiscordBridge:
 class _Wait:
     """A question waiting for the hub's answer."""
 
-    __slots__ = ("deadline", "answered", "wake", "task")
+    __slots__ = ("deadline", "answered", "wake", "task", "author_id")
 
     def __init__(self):
         self.deadline = 0.0
         self.answered = False
         self.wake = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
+        self.author_id: Optional[int] = None  # who asked the latest question
 
 
 def _session_of(message: Message) -> Optional[str]:

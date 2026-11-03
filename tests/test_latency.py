@@ -53,7 +53,8 @@ def test_burst_replies_do_not_queue_behind_each_other():
     try:
         dispatched = {c.id: loop.dispatch(text_message("what time is it", c, author_id=c.id))
                       for c in channels}
-        assert wait_for(lambda: all(c.sent for c in channels), timeout=15), "not every reply was sent"
+        # answered, not just started: a send cancelled half way must fail this
+        assert wait_for(lambda: all(c.done for c in channels), timeout=15), "not every reply was sent"
     finally:
         loop.stop()
         hub.close()
@@ -78,7 +79,7 @@ def test_a_slow_hub_send_does_not_hold_up_replies():
     try:
         loop.dispatch(text_message("first", first, author_id=1))
         loop.dispatch(text_message("second", second, author_id=2))
-        assert wait_for(lambda: first.sent and second.sent, timeout=15)
+        assert wait_for(lambda: first.done and second.done, timeout=15)
     finally:
         loop.stop()
         hub.close()

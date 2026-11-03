@@ -27,6 +27,7 @@ class FakeChannel:
         self.type = discord.ChannelType.private if dm else discord.ChannelType.text
         self.latency = latency
         self.sent: List[tuple] = []
+        self.done: List[tuple] = []  # like sent, once Discord has answered
         self.typed: List[float] = []
         self.fail_typing = False
 
@@ -34,6 +35,7 @@ class FakeChannel:
         self.sent.append((time.monotonic(), content, kwargs))
         if self.latency:
             await asyncio.sleep(self.latency)
+        self.done.append((time.monotonic(), content, kwargs))
 
     def typing(self):
         channel = self
@@ -56,6 +58,7 @@ class FakeDiscord:
         self.user = MagicMock(id=999)
         self.channels: Dict[int, FakeChannel] = {}
         self.fetched: List[int] = []
+        self.closed_at: Optional[float] = None
 
     def event(self, handler):
         return handler
@@ -73,6 +76,9 @@ class FakeDiscord:
 
     def is_ready(self):
         return True
+
+    async def close(self):
+        self.closed_at = time.monotonic()
 
     def is_closed(self):
         return False

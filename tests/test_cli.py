@@ -132,7 +132,7 @@ def test_the_reply_timeout_defaults_to_a_minute_and_must_be_a_number(started):
     assert options["reply_timeout"] == 60.0
     result, options = run(["--token", "tok", "--reply-timeout", "0"], CLEAN, started)
     assert options["reply_timeout"] == 0.0
-    for wrong in ("soon", "-1"):
+    for wrong in ("soon", "-1", "inf", "nan"):
         result, _ = run(["--token", "tok"], {**CLEAN, "BRIDGE_REPLY_TIMEOUT": wrong}, started)
         assert result.exit_code != 0
         assert "reply-timeout" in result.output
