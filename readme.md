@@ -78,8 +78,10 @@ hivemind-discord-bridge \
 
 By default the bridge answers direct messages and any text channel the
 bot can read. Pass `--allowed-channel <channel_id>` (repeatable) to
-restrict channel replies to specific channels; DMs are always accepted
-regardless of this setting.
+restrict it to specific channels; direct messages are then refused too,
+so nobody steps around the list by messaging the bot. `--dm-policy`
+(`auto`, `allow` or `deny`) changes that: `auto`, the default, refuses
+DMs when channels are listed and accepts them otherwise.
 
 In a server channel, the bridge forwards only messages that mention the
 bot (`@bot what time is it`), and removes the mention before forwarding, so
@@ -123,6 +125,7 @@ host could read it:
 | --- | --- |
 | `--token` | `DISCORD_BOT_TOKEN` |
 | `--allowed-channel` | `DISCORD_ALLOWED_CHANNELS` (ids separated by commas) |
+| `--dm-policy` | `DISCORD_DM_POLICY` (`auto`, `allow` or `deny`) |
 | `--no-require-mention` | `DISCORD_REQUIRE_MENTION` (`true`/`false`) |
 | `--session-scope` | `DISCORD_SESSION_SCOPE` (`channel`/`person`) |
 | `--health-port` | `BRIDGE_HEALTH_PORT` |

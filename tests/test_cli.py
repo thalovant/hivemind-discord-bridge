@@ -29,7 +29,7 @@ CLEAN = {name: None for name in (
     "HIVEMIND_ACCESS_KEY", "HIVEMIND_ACCESS_KEY_FILE", "HIVEMIND_PASSWORD",
     "HIVEMIND_PASSWORD_FILE", "HIVEMIND_HOST", "HIVEMIND_PORT", "HIVEMIND_SITE_ID",
     "HIVEMIND_SELF_SIGNED", "HIVEMIND_LANG", "DISCORD_REQUIRE_MENTION",
-    "DISCORD_SESSION_SCOPE", "BRIDGE_HEALTH_PORT")}
+    "DISCORD_SESSION_SCOPE", "BRIDGE_HEALTH_PORT", "DISCORD_DM_POLICY")}
 
 
 def test_everything_can_come_from_the_environment(started):
@@ -51,7 +51,7 @@ def test_everything_can_come_from_the_environment(started):
         "token": "tok", "key": "key", "password": "pw", "host": "ws://hub.local",
         "port": 6000, "self_signed": True, "lang": "fr-fr", "site_id": "lounge",
         "allowed_channels": [42, 43], "require_mention": True,
-        "session_scope": "person", "health_port": 8080,
+        "session_scope": "person", "health_port": 8080, "dm_policy": "auto",
     }
 
 
@@ -111,4 +111,13 @@ def test_mention_gating_is_on_by_default_and_can_be_turned_off(started):
 def test_the_session_scope_defaults_to_the_channel_and_rejects_anything_else(started):
     assert run(["--token", "t"], CLEAN, started)[1]["session_scope"] == "channel"
     result, _ = run(["--token", "t"], {**CLEAN, "DISCORD_SESSION_SCOPE": "room"}, started)
+    assert result.exit_code != 0
+
+
+def test_the_dm_policy_comes_from_a_flag_or_the_environment(started):
+    assert run(["--dm-policy", "allow"], {**CLEAN, "DISCORD_BOT_TOKEN": "tok"},
+               started)[1]["dm_policy"] == "allow"
+    assert run([], {**CLEAN, "DISCORD_BOT_TOKEN": "tok", "DISCORD_DM_POLICY": "deny"},
+               started)[1]["dm_policy"] == "deny"
+    result, _ = run(["--dm-policy", "sometimes"], {**CLEAN, "DISCORD_BOT_TOKEN": "tok"}, started)
     assert result.exit_code != 0

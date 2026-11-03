@@ -21,12 +21,14 @@ def connect_discord_to_hivemind(token, key=None, password=None,
                                 host=None, port=5678, self_signed=False,
                                 lang="en-us", site_id="discord",
                                 allowed_channels=None, require_mention=True,
-                                session_scope="channel", health_port=None):
+                                session_scope="channel", health_port=None,
+                                dm_policy="auto"):
     bridge = HiveMindDiscordBridge(
         token=token, key=key, password=password, host=host, port=port,
         self_signed=self_signed, lang=lang, site_id=site_id,
         allowed_channels=allowed_channels, require_mention=require_mention,
         session_scope=session_scope, health_port=health_port,
+        dm_policy=dm_policy,
     )
     bridge.start()
     return bridge
@@ -66,8 +68,13 @@ def _channel_ids(ctx, param, values):
 @click.option("--allowed-channel", "allowed_channels", multiple=True,
              envvar="DISCORD_ALLOWED_CHANNELS", callback=_channel_ids,
              help="Discord text channel id allowed to talk to the bridge "
-                  "(repeatable); default: any channel the bot can read, plus DMs "
+                  "(repeatable); default: any channel the bot can read "
                   "[DISCORD_ALLOWED_CHANNELS, ids separated by commas]")
+@click.option("--dm-policy", type=click.Choice(["auto", "allow", "deny"]),
+             default="auto", envvar="DISCORD_DM_POLICY",
+             help="direct messages: deny (ignore them), allow, or auto "
+                  "(default: deny when --allowed-channel is given, allow "
+                  "otherwise) [DISCORD_DM_POLICY]")
 @click.option("--require-mention/--no-require-mention", default=True,
              envvar="DISCORD_REQUIRE_MENTION",
              help="in a server channel, forward only messages that mention the bot "
@@ -96,8 +103,8 @@ def _channel_ids(ctx, param, values):
              help="accept self-signed SSL certificates [HIVEMIND_SELF_SIGNED]")
 @click.option("--lang", default="en-us", envvar="HIVEMIND_LANG",
              help="utterance language [HIVEMIND_LANG]")
-def main(token, allowed_channels, require_mention, session_scope, health_port,
-        key, password, host, port, site_id, self_signed, lang):
+def main(token, allowed_channels, dm_policy, require_mention, session_scope,
+        health_port, key, password, host, port, site_id, self_signed, lang):
     """Bridge a Discord bot to a HiveMind node."""
     token = _from_file(token, "DISCORD_BOT_TOKEN")
     if not token:
@@ -118,6 +125,7 @@ def main(token, allowed_channels, require_mention, session_scope, health_port,
             require_mention=require_mention,
             session_scope=session_scope,
             health_port=health_port,
+            dm_policy=dm_policy,
         )
     except KeyboardInterrupt:
         LOG.info("shutting down")

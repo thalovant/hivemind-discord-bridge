@@ -131,7 +131,8 @@ casually.
   denial locally — a silently dropped message on the hub side is the hub
   doing its job, not a bug here. `--allowed-channel` is a separate,
   bridge-side filter over which Discord channels may originate traffic (DMs
-  are always accepted regardless); it is not a substitute for hub-side
+  follow `--dm-policy`, refused by default when channels are listed); it is
+  not a substitute for hub-side
   message-type ACLs.
 - **Rejected credentials must fail fast.** Once `handshake_max_retries` is
   bounded (see above), a wrong access key/password turns into a clean

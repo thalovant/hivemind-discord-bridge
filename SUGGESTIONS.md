@@ -1,12 +1,12 @@
-Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Address the CI and documentation review: publish from main only, sign before :latest, pinned audit evidence, qualified claims.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-policy (refused by default when channels are listed).
 
 # Suggestions: hivemind-discord-bridge
 
-## Restrict direct messages
+## Direct messages from chosen people
 
-- **Problem:** AUDIT.md section 1: `--allowed-channel` does not cover DMs, so anyone who can DM the bot reaches the hub.
-- **Proposal:** a `--dm-policy` setting (`open`, `allowed-users`, `off`) with a user-id allow-list, by flag and environment variable; a managed deployment uses `allowed-users` or `off`.
-- **Impact:** high for any bot whose server members are not all trusted; small change.
+- **Problem:** `--dm-policy` (done 2026-11-03) is all or nothing: `deny` or `allow`.
+- **Proposal:** an `allowed-users` value with a user-id allow-list, by flag and environment variable, for an owner who wants to talk to the bot privately.
+- **Impact:** small; the safe default is already in place.
 
 ## Per-person rate limit
 
