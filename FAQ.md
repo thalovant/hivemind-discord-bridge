@@ -36,7 +36,7 @@ When Discord refuses the token, `LoginFailure` (401) at login or the gateway clo
 
 ## Why did the bot not answer a message from a few minutes ago?
 
-A message delivered more than 120 s after it was sent is not answered (`HiveMindDiscordBridge._is_stale`, `MAX_MESSAGE_AGE`). Discord does not replay history on connect, but a gateway RESUME after an outage delivers the events missed meanwhile.
+A message delivered more than 120 s after it was sent is not answered (`HiveMindDiscordBridge._is_stale`, `MAX_MESSAGE_AGE`). Discord does not replay history on connect, but a gateway RESUME after an outage delivers the events missed meanwhile. Each drop is logged at INFO with the message's age (never its text): if new messages are dropped too, the host clock is wrong; it must stay within 120 s of Discord's.
 
 ## What does the bot say when the hub cannot answer, and in which language?
 
@@ -56,7 +56,7 @@ No. Replies are sent with `discord.AllowedMentions.none()` (`NO_PINGS`): a hub a
 
 ## What about a reply longer than a Discord message?
 
-It is sent as several messages, in order, with every character kept (`hivemind_discord_bridge/split.py`, `split_message`); cuts fall on paragraph, line, sentence or word boundaries.
+It is sent as several messages, in order, with every character kept (`hivemind_discord_bridge/split.py`, `split_message`); cuts fall on paragraph, line, sentence or word boundaries; only a piece with no such boundary in its second half (a word longer than the limit) is cut mid-word.
 
 ## The log says the hub does not allow this bridge to send `recognizer_loop:utterance`
 

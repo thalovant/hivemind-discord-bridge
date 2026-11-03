@@ -48,7 +48,7 @@ Evidence: `python -m pytest tests -q` (92 passed, 2026-11-03, Python 3.12 and 3.
 
 ## 9. A channel the bot has not cached costs an API call per reply
 
-- **Fixed 2026-11-03.** The bridge keeps the channel each message came from (`_keep_channel`, `_resolve_channel`, at most `CHANNELS_KEPT` = 1024), so a reply or a typing trigger no longer calls `fetch_channel`. Test: `tests/test_waiting.py::test_a_reply_reuses_the_channel_the_question_came_from`.
+- **Fixed 2026-11-03.** The bridge keeps the channel each message came from (`_keep_channel`, `_resolve_channel`, at most `CHANNELS_KEPT` = 1024), so a reply or a typing trigger calls `fetch_channel` only for a channel the bridge has not seen a message from and discord.py has not cached. Test: `tests/test_waiting.py::test_a_reply_reuses_the_channel_the_question_came_from`.
 
 ## 10. A rejected token was a crash like any other
 
@@ -98,4 +98,9 @@ Evidence: `python -m pytest tests -q` (92 passed, 2026-11-03, Python 3.12 and 3.
   - `stop()` closed the Discord client under replies being sent; `_drain_and_close` gives them `SEND_DRAIN` (5 s) first. Test: `test_stopping_lets_a_reply_being_sent_finish`. Only `stop()` drains: a SIGTERM still ends the process at once (SUGGESTIONS.md).
   - A rejected token left the health port bound; it is released (`start`). Test: `tests/test_token.py::test_a_rejected_token_frees_the_health_port`.
   - Negative or NaN `max_message_age` and negative or non-finite `reply_timeout` are refused; click's `FloatRange` let `inf` and `nan` through (`__init__`, `__main__._finite`). Tests: `test_nonsense_timings_are_refused`, `tests/test_cli.py::test_the_reply_timeout_defaults_to_a_minute_and_must_be_a_number`.
+- **Fixed 2026-11-03**, from the automated review of thalovant/hivemind-discord-bridge#5 (carried over to the Telegram bridge as well):
+  - A slow hub socket queued questions for the hub-send thread without limit, and a queued one could be sent after the person had been told the bridge cannot answer. At most `HUB_BACKLOG_MAX` (64) wait; beyond that the person is told at once; a question that waited past the reply timeout is not sent (`_forward_unless_late`). Tests: `test_a_hub_that_does_not_keep_up_gets_no_endless_queue`, `test_a_question_that_waited_past_the_timeout_for_the_hub_is_not_sent`.
+  - A refusal was pinned on the only wait even when several people's questions shared it (channel scope); it now needs a wait holding one question (`_denied`, `_Wait.questions`). Test: `test_a_refusal_is_not_pinned_on_a_wait_shared_by_several_questions`.
+  - A stale message was dropped at DEBUG, so a wrong host clock silently dropped everything; drops are logged at INFO with the age (`_is_stale`). Test: `tests/test_stale.py::test_a_dropped_message_is_logged_with_its_age_not_its_text`.
+- **Kept on purpose:** the first answer for a session ends that session's wait even when several people share it (channel scope), and an answer with no session ends every wait in the channel: telling a person "cannot answer" after a real answer is worse than a lost typing indicator. HiveMind-core returns the declared session on replies (it strips its namespace prefix), so a person-scope answer matches its own wait.
 - **Not applicable here:** handler blocking (discord.py runs each `on_message` as its own task), per-person languages (a Discord message carries none), flood-control budget (discord.py waits out 429s itself).

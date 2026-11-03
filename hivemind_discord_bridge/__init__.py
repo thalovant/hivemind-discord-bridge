@@ -106,6 +106,9 @@ TYPING_EVERY = 8.0
 #: The "cannot answer right now" line is said at most once per person and
 #: channel in this many seconds, however many questions go unanswered.
 UNAVAILABLE_EVERY = 30.0
+#: Questions waiting for the hub-send thread at most. Beyond that the hub
+#: is not keeping up: the person is told at once instead of queueing more.
+HUB_BACKLOG_MAX = 64
 #: Replies mention no one: not @everyone, @here, a role, nor a person.
 NO_PINGS = discord.AllowedMentions.none()
 #: When the bridge stops, replies already being sent get this long to finish.
@@ -293,6 +296,7 @@ class HiveMindDiscordBridge:
         self._typing_at: Dict[int, float] = {}
         self._unavailable_at: Dict[Tuple[int, Optional[int]], float] = {}
         self._ended: Dict[Tuple[int, str], float] = {}
+        self._hub_backlog = 0  # questions submitted to the hub-send thread, not yet sent
         self._sending: Set[asyncio.Task] = set()
         self._channels: "OrderedDict[int, object]" = OrderedDict()
         self._background: Set[asyncio.Task] = set()
@@ -448,13 +452,20 @@ class HiveMindDiscordBridge:
             return
 
         self._keep_channel(channel)
+        session_id = self.session_id(channel.id, message.author)
+        author_id = getattr(message.author, "id", None)
+        if self._hub_backlog >= HUB_BACKLOG_MAX:
+            LOG.warning(f"{self._hub_backlog} questions are waiting to be sent to "
+                        f"the hub; not queueing one more from channel {channel.id}")
+            self._give_up(channel.id, session_id, author_id)
+            return
         # Sent on the hub-send thread, never on this loop, so the loop keeps
         # sending replies (and heartbeats) while the hub socket is slow;
         # "typing…" starts while it goes.
+        self._hub_backlog += 1
         sent = asyncio.get_running_loop().run_in_executor(
-            self._hub_sender, self.forward_to_hivemind, text, message.author, channel.id)
-        session_id = self.session_id(channel.id, message.author)
-        author_id = getattr(message.author, "id", None)
+            self._hub_sender, self._forward_unless_late, time.monotonic(),
+            text, message.author, channel.id)
         self._expect_answer(channel.id, session_id, author_id)
         try:
             await sent
@@ -464,6 +475,26 @@ class HiveMindDiscordBridge:
             LOG.warning(f"could not send a message from channel {channel.id} to "
                         f"the hub: {type(error).__name__}")
             self._give_up(channel.id, session_id, author_id)
+        finally:
+            self._hub_backlog -= 1
+
+    def _forward_unless_late(self, read_at: float, text: str, author, channel_id: int) -> bool:
+        """``forward_to_hivemind``, unless the question waited too long to be sent.
+
+        When the hub socket is slow, questions queue for the hub-send thread.
+        One that waited past the reply timeout has already been told the
+        bridge cannot answer (or, with waiting off, is older than
+        ``max_message_age``): sending it now would bring an answer after
+        that, so it is dropped.
+        """
+        limit = self.reply_timeout if self.reply_timeout > 0 else self.max_message_age
+        waited = time.monotonic() - read_at
+        if waited >= limit:
+            LOG.info(f"not sending a question from channel {channel_id} that waited "
+                     f"{waited:.0f} s for the hub")
+            return False
+        self.forward_to_hivemind(text, author, channel_id)
+        return True
 
     def _is_stale(self, message: "discord.Message") -> bool:
         """Whether ``message`` was sent more than ``max_message_age`` ago."""
@@ -473,7 +504,10 @@ class HiveMindDiscordBridge:
         age = time.time() - sent.timestamp()
         if age <= self.max_message_age:
             return False
-        LOG.debug(f"not answering a message sent {age:.0f} s ago")
+        # INFO, not DEBUG: if every new message is dropped, the host clock is
+        # probably wrong, and this line is how an operator finds out.
+        LOG.info(f"not answering a message sent {age:.0f} s ago (older than "
+                 f"{self.max_message_age:g} s; the host clock must be right)")
         return True
 
     def addressed_text(self, message: "discord.Message", is_dm: bool) -> Optional[str]:
@@ -710,6 +744,7 @@ class HiveMindDiscordBridge:
             wait = self._waits[key] = _Wait()
             wait.task = loop.create_task(self._wait_for_answer(key, wait))
         wait.deadline = loop.time() + self.reply_timeout
+        wait.questions += 1
         wait.author_id = author_id  # the line, if it comes, answers the latest question
         wait.wake.set()
 
@@ -768,9 +803,13 @@ class HiveMindDiscordBridge:
                 wait.wake.set()
 
     def _denied(self) -> None:
+        # Only when the refusal can only be for one question: one wait, and
+        # one question in it (in a channel-scope channel several people can
+        # share a wait, and the refused one may not be the latest).
         if len(self._waits) == 1:
             (key, wait), = self._waits.items()
-            self._give_up(key[0], key[1], wait.author_id)
+            if wait.questions == 1:
+                self._give_up(key[0], key[1], wait.author_id)
 
     def _give_up(self, channel_id: int, session_id: str, author_id: Optional[int]) -> None:
         """The hub will not answer this question: stop waiting and say so now."""
@@ -836,7 +875,7 @@ class HiveMindDiscordBridge:
 class _Wait:
     """A question waiting for the hub's answer."""
 
-    __slots__ = ("deadline", "answered", "wake", "task", "author_id")
+    __slots__ = ("deadline", "answered", "wake", "task", "author_id", "questions")
 
     def __init__(self):
         self.deadline = 0.0
@@ -844,6 +883,7 @@ class _Wait:
         self.wake = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
         self.author_id: Optional[int] = None  # who asked the latest question
+        self.questions = 0  # questions asked since the wait began
 
 
 def _session_of(message: Message) -> Optional[str]:

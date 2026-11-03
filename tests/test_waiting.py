@@ -240,3 +240,41 @@ def test_stopping_lets_a_reply_being_sent_finish(running):
     assert wait_for(lambda: bridge.fake.closed_at is not None, timeout=5)
     assert len(channel.done) == 3
     assert bridge.fake.closed_at >= channel.done[-1][0]
+
+
+def test_a_question_that_waited_past_the_timeout_for_the_hub_is_not_sent(running):
+    """Told "cannot answer" already, the person must not get an answer after that."""
+    hub = FakeHub(emit_delay=0.6)
+    bridge = running(hub, reply_timeout=0.3)
+    bridge.ask(channel_id=1, author_id=1)
+    bridge.ask(channel_id=2, author_id=2)
+    assert wait_for(lambda: bridge.sent(2), timeout=3)  # told at the timeout
+    time.sleep(1.0)
+    assert [message.context["channel_id"] for _, message in hub.emitted] == [1]
+
+
+def test_a_hub_that_does_not_keep_up_gets_no_endless_queue(running, monkeypatch):
+    monkeypatch.setattr(bridge_module, "HUB_BACKLOG_MAX", 1)
+    hub = FakeHub(emit_delay=0.5)
+    bridge = running(hub, reply_timeout=30)
+    bridge.ask(channel_id=1, author_id=1)
+    asked = bridge.ask(channel_id=2, author_id=2)
+    assert wait_for(lambda: bridge.sent(2), timeout=2)
+    assert bridge.channels[2].sent[0][0] - asked < 0.3
+    assert bridge.sent(2) == [LINES["en"][UNAVAILABLE]]
+    time.sleep(0.8)
+    assert [message.context["channel_id"] for _, message in hub.emitted] == [1]
+
+
+def test_a_refusal_is_not_pinned_on_a_wait_shared_by_several_questions(running):
+    """Channel scope: two people's questions share one wait; the refused one is unknown."""
+    bridge = running(reply_timeout=30)
+    channel = bridge.fake.channel(800, dm=False)
+    bridge.channels[800] = channel
+    _in_channel(bridge, channel, author_id=1)
+    _in_channel(bridge, channel, author_id=2)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 2)
+    bridge.hub.send("hive.policy.denied", {"denied_type": "recognizer_loop:utterance"}, {})
+    time.sleep(0.3)
+    assert bridge.sent(800) == []
+    assert len(bridge.bridge._waits) == 1
