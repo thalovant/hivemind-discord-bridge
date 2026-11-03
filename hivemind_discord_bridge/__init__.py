@@ -61,6 +61,47 @@ SESSION_SCOPES = ("channel", "person")
 #: and accepts them otherwise.
 DM_POLICIES = ("auto", "allow", "deny")
 
+#: What the bridge writes to the termination log when Discord refuses the
+#: bot token, so the platform can ask for a new token instead of restarting
+#: a bridge that can never log in.
+TOKEN_REJECTED = "token_rejected"
+#: Where a container says why it stopped (Kubernetes' default
+#: ``terminationMessagePath``).
+TERMINATION_LOG = "/dev/termination-log"
+#: Exit status when Discord refuses the bot token.
+EXIT_TOKEN_REJECTED = 3
+#: The gateway's close code for a token it does not accept ("Authentication
+#: failed"): how a token reset while the bridge runs shows up.
+GATEWAY_AUTHENTICATION_FAILED = 4004
+
+
+class TokenRejected(RuntimeError):
+    """Discord refused the bot token.
+
+    ``LoginFailure`` (401 on login) at start, or the gateway closing with
+    4004 (authentication failed) later, after the token was reset.
+    """
+
+
+def report_token_rejected(path: Optional[str] = None) -> None:
+    """Write exactly ``token_rejected`` to the termination log.
+
+    A file that cannot be written (not in a container, read-only) is
+    ignored: the exit status still says the bridge stopped.
+    """
+    try:
+        with open(path or TERMINATION_LOG, "w", encoding="utf-8") as handle:
+            handle.write(TOKEN_REJECTED)
+    except OSError:
+        pass
+
+
+def _is_token_rejection(error: BaseException) -> bool:
+    if isinstance(error, discord.LoginFailure):
+        return True
+    return (isinstance(error, discord.ConnectionClosed)
+            and getattr(error, "code", None) == GATEWAY_AUTHENTICATION_FAILED)
+
 
 class HiveMindDiscordBridge:
     """Bridge a Discord bot to a HiveMind node."""
@@ -162,6 +203,7 @@ class HiveMindDiscordBridge:
         self._started = False
         self._connected = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._token_rejected = False
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -186,6 +228,9 @@ class HiveMindDiscordBridge:
 
         Blocks the calling thread for as long as the bot is connected to
         Discord. Intended to be the last call in a ``__main__``.
+
+        Raises :class:`TokenRejected` when Discord refuses the bot token, at
+        login or later; the HiveMind connection is closed first.
         """
         if self._started:
             return
@@ -204,9 +249,29 @@ class HiveMindDiscordBridge:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self.discord.start(self.token))
+            self._loop.run_until_complete(self._run_discord())
         finally:
             self._loop.close()
+        if self._token_rejected:
+            try:
+                self.client.close()
+            except Exception:
+                LOG.exception("error closing HiveMind client")
+            self._started = False
+            self._connected.clear()
+            raise TokenRejected("Discord rejected the bot token")
+
+    async def _run_discord(self) -> None:
+        try:
+            await self.discord.start(self.token)
+        except Exception as error:
+            if not _is_token_rejection(error):
+                raise
+            LOG.error("Discord refused the bot token: it is wrong or was reset")
+            self._token_rejected = True
+        finally:
+            if not self.discord.is_closed():
+                await self.discord.close()
 
     def stop(self) -> None:
         """Stop the Discord client and close the HiveMind connection."""
@@ -382,4 +447,4 @@ class HiveMindDiscordBridge:
         await channel.send(text)
 
 
-__all__ = ["HiveMindDiscordBridge", "platform"]
+__all__ = ["HiveMindDiscordBridge", "TokenRejected", "report_token_rejected", "platform"]

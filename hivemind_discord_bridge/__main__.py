@@ -14,7 +14,8 @@ import os
 import click
 from ovos_utils.log import LOG
 
-from hivemind_discord_bridge import HiveMindDiscordBridge
+import hivemind_discord_bridge
+from hivemind_discord_bridge import HiveMindDiscordBridge, TokenRejected
 
 
 def connect_discord_to_hivemind(token, key=None, password=None,
@@ -105,7 +106,11 @@ def _channel_ids(ctx, param, values):
              help="utterance language [HIVEMIND_LANG]")
 def main(token, allowed_channels, dm_policy, require_mention, session_scope,
         health_port, key, password, host, port, site_id, self_signed, lang):
-    """Bridge a Discord bot to a HiveMind node."""
+    """Bridge a Discord bot to a HiveMind node.
+
+    When Discord refuses the bot token, writes token_rejected to
+    /dev/termination-log and exits with status 3.
+    """
     token = _from_file(token, "DISCORD_BOT_TOKEN")
     if not token:
         raise click.UsageError("a bot token is required: --token, DISCORD_BOT_TOKEN "
@@ -127,6 +132,10 @@ def main(token, allowed_channels, dm_policy, require_mention, session_scope,
             health_port=health_port,
             dm_policy=dm_policy,
         )
+    except TokenRejected:
+        LOG.error("Discord rejected the bot token; replace it to start the bridge again")
+        hivemind_discord_bridge.report_token_rejected()
+        raise SystemExit(hivemind_discord_bridge.EXIT_TOKEN_REJECTED) from None
     except KeyboardInterrupt:
         LOG.info("shutting down")
 
