@@ -167,14 +167,55 @@ def test_allowed_channel_is_forwarded():
     fake_client.emit.assert_called_once()
 
 
-def test_dm_bypasses_allowed_channels():
+def test_a_dm_cannot_step_around_the_channel_list():
+    """With channels listed, a stranger's DM is not a way in (dm policy auto)."""
     bridge, fake_client, fake_discord, _ = _make_bridge(allowed_channels=[1, 2, 3])
+    bridge.connect_hivemind()
+    assert bridge.dm_policy == "deny"
+
+    message = _fake_message(channel_id=999, is_dm=True)
+    asyncio.run(bridge.on_message(message))
+
+    fake_client.emit.assert_not_called()
+
+
+def test_dms_can_be_allowed_next_to_a_channel_list():
+    bridge, fake_client, fake_discord, _ = _make_bridge(allowed_channels=[1, 2, 3],
+                                                        dm_policy="allow")
     bridge.connect_hivemind()
 
     message = _fake_message(channel_id=999, is_dm=True)
     asyncio.run(bridge.on_message(message))
 
     fake_client.emit.assert_called_once()
+
+
+def test_without_a_channel_list_dms_are_allowed_by_default():
+    bridge, fake_client, fake_discord, _ = _make_bridge()
+    bridge.connect_hivemind()
+    assert bridge.dm_policy == "allow"
+
+    message = _fake_message(channel_id=999, is_dm=True)
+    asyncio.run(bridge.on_message(message))
+
+    fake_client.emit.assert_called_once()
+
+
+def test_dms_can_be_refused_without_a_channel_list():
+    bridge, fake_client, fake_discord, _ = _make_bridge(dm_policy="deny",
+                                                        require_mention=False)
+    bridge.connect_hivemind()
+
+    asyncio.run(bridge.on_message(_fake_message(channel_id=999, is_dm=True)))
+    fake_client.emit.assert_not_called()
+    # a server channel still works
+    asyncio.run(bridge.on_message(_fake_message(text="hi", channel_id=7)))
+    fake_client.emit.assert_called_once()
+
+
+def test_an_unknown_dm_policy_is_refused():
+    with pytest.raises(ValueError):
+        _make_bridge(dm_policy="sometimes")
 
 
 def test_speak_schedules_send_on_discord_loop():

@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Thalovant fork set up: fixes on main, Thalovant CI and signed images, docs set added.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-policy (refused by default when channels are listed).
 
 # Quick facts: hivemind-discord-bridge
 
@@ -24,6 +24,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Thalovant fork set up: fixes o
 | --- | --- |
 | `--token` | `DISCORD_BOT_TOKEN` (or `DISCORD_BOT_TOKEN_FILE`) |
 | `--allowed-channel` | `DISCORD_ALLOWED_CHANNELS` |
+| `--dm-policy` | `DISCORD_DM_POLICY` (`auto`: deny when channels are listed) |
 | `--no-require-mention` | `DISCORD_REQUIRE_MENTION` |
 | `--session-scope` | `DISCORD_SESSION_SCOPE` (`channel` or `person`) |
 | `--health-port` | `BRIDGE_HEALTH_PORT` |

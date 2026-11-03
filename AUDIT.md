@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Address the CI and documentation review: publish from main only, sign before :latest, pinned audit evidence, qualified claims.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-policy (refused by default when channels are listed).
 
 # Audit: hivemind-discord-bridge
 
@@ -7,8 +7,9 @@ Evidence: `python -m pytest tests -q` (42 passed, 2026-11-02, Python 3.12) and r
 ## 1. Every channel is allowed unless an allow-list is set
 
 - **Where:** `hivemind_discord_bridge/__init__.py:118`.
-- **Finding:** with no `--allowed-channel`, any channel the bot is in reaches the hub. Direct messages are never filtered: `--allowed-channel` does not apply to DMs (`hivemind_discord_bridge/__init__.py`, `on_message`), so anyone who can DM the bot reaches the hub whatever the allow-list says.
-- **Impact:** anyone who can message the bot spends the hub's capacity. A managed deployment should always set the allow-list, and needs a way to restrict DMs (see SUGGESTIONS.md).
+- **Finding:** with no `--allowed-channel`, any channel the bot is in reaches the hub.
+- **Impact:** anyone who can message the bot spends the hub's capacity. A managed deployment should always set the allow-list.
+- **Fixed 2026-11-03 (direct messages):** DMs used to bypass the allow-list. They now follow `--dm-policy` (`DISCORD_DM_POLICY`): `auto`, the default, refuses DMs when `--allowed-channel` is given (`HiveMindDiscordBridge.on_message`, `dm_policy`). Tests: `tests/test_bridge.py::test_a_dm_cannot_step_around_the_channel_list` and the four next to it.
 
 ## 2. No per-channel or per-person rate limit
 

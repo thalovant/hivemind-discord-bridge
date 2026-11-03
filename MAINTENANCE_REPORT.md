@@ -1,6 +1,16 @@
-Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Address the CI and documentation review: publish from main only, sign before :latest, pinned audit evidence, qualified claims.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-policy (refused by default when channels are listed).
 
 # Maintenance report: hivemind-discord-bridge
+
+## 2026-11-03: direct messages follow --dm-policy
+
+`--allowed-channel` did not apply to direct messages, so anyone who could DM the bot reached the hub whatever the channel list said (AUDIT.md section 1). `HiveMindDiscordBridge` gains `dm_policy` (`auto`, `allow`, `deny`; CLI `--dm-policy`, environment `DISCORD_DM_POLICY`). `auto`, the default, refuses DMs when channels are listed and accepts them otherwise, so an unconfigured bot behaves as before and a restricted one is restricted. A refused DM is dropped silently: answering strangers would let anyone make the bot post. Thalovant's managed bridges always list channels, so they refuse DMs with no change on the platform side.
+
+Verification: `python -m pytest -q` 47 passed (Python 3.14); `ruff check --select F,E9 .` clean. The old test `test_dm_bypasses_allowed_channels`, which asserted the gap, is replaced by five tests of the policy and one CLI test.
+
+### Transparency Report
+
+AI Model: Claude Opus 5.5. Actions Taken: implemented `dm_policy` and the CLI option, replaced and added tests, updated README, QUICK_FACTS, AUDIT, SUGGESTIONS and AGENTS. Oversight: owner-directed ("fix the still open"); reviewed by the session lead before the pull request.
 
 ## 2026-11-02: Thalovant fork
 

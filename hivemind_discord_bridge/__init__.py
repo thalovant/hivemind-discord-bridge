@@ -55,6 +55,11 @@ DEFAULT_HANDSHAKE_MAX_RETRIES = 10
 #: session per person in each channel, so each person's follow-up questions
 #: continue their own conversation.
 SESSION_SCOPES = ("channel", "person")
+#: Who may talk to the bot in a direct message. ``"auto"`` refuses DMs when
+#: ``allowed_channels`` restricts the bot to some channels (a channel list
+#: that anyone could step around by messaging the bot directly is no limit)
+#: and accepts them otherwise.
+DM_POLICIES = ("auto", "allow", "deny")
 
 
 class HiveMindDiscordBridge:
@@ -74,6 +79,7 @@ class HiveMindDiscordBridge:
                  require_mention: bool = True,
                  session_scope: str = "channel",
                  health_port: Optional[int] = None,
+                 dm_policy: str = "auto",
                  *,
                  client: Optional[HiveMessageBusClient] = None,
                  discord_client: Optional[discord.Client] = None):
@@ -87,8 +93,8 @@ class HiveMindDiscordBridge:
         lang: default utterance language tag.
         site_id: this bridge's HiveMind site id.
         allowed_channels: if given, only messages from these Discord
-            text channel ids are forwarded (DMs are always allowed);
-            leave unset to accept any channel the bot can read plus DMs.
+            text channel ids are forwarded; leave unset to accept any
+            channel the bot can read. Direct messages follow ``dm_policy``.
         handshake_max_retries: bound on HiveMessageBusClient's handshake
             retries; without it the client's own default of None retries
             forever and hangs the bridge if the hub never answers.
@@ -104,6 +110,9 @@ class HiveMindDiscordBridge:
             are the same conversation.
         health_port: if set, serve ``/healthz`` and ``/readyz`` on this
             port (see :mod:`hivemind_discord_bridge.health`).
+        dm_policy: ``"deny"`` ignores direct messages, ``"allow"`` forwards
+            them, ``"auto"`` (default) denies them when ``allowed_channels``
+            is set and allows them otherwise.
         client: pre-built HiveMessageBusClient (tests / advanced setups).
             NOTE: HiveMessageBusClient does NOT open a connection in
             __init__ -- call start() (or connect_hivemind()) to connect.
@@ -122,6 +131,12 @@ class HiveMindDiscordBridge:
             raise ValueError(f"session_scope must be one of {SESSION_SCOPES}, "
                              f"not {session_scope!r}")
         self.session_scope = session_scope
+        if dm_policy not in DM_POLICIES:
+            raise ValueError(f"dm_policy must be one of {DM_POLICIES}, "
+                             f"not {dm_policy!r}")
+        if dm_policy == "auto":
+            dm_policy = "deny" if self.allowed_channels is not None else "allow"
+        self.dm_policy = dm_policy
 
         if discord_client is not None:
             self.discord = discord_client
@@ -228,8 +243,9 @@ class HiveMindDiscordBridge:
 
         Drops the message instead of forwarding when: it has no content,
         it came from the bot itself (would otherwise create a feedback
-        loop), it is outside ``allowed_channels`` (when configured, and
-        it isn't a DM), or HiveMind has not completed its handshake yet
+        loop), it is outside ``allowed_channels`` (when configured), it is a
+        direct message and ``dm_policy`` refuses those, or HiveMind has not
+        completed its handshake yet
         (forwarding before that point gets the connection killed by the
         hub).
         """
@@ -242,6 +258,11 @@ class HiveMindDiscordBridge:
 
         channel = message.channel
         is_dm = isinstance(channel, discord.DMChannel) or getattr(channel, "type", None) == discord.ChannelType.private
+        if is_dm and self.dm_policy == "deny":
+            # Silently: answering every stranger's DM would let anyone make
+            # the bot post, and say that it exists.
+            LOG.debug("ignoring a direct message (dm policy: deny)")
+            return
         if not is_dm and self.allowed_channels is not None and channel.id not in self.allowed_channels:
             LOG.debug(f"ignoring message from non-allowed channel {channel.id}")
             return
