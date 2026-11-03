@@ -14,11 +14,11 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: rejected token re
 | Image user | `bridge`, uid 10001; identity in `/home/bridge/.config/hivemind` |
 | Default branch | `main` (upstream: `JarbasHiveMind/hivemind-discord-bridge`, branch `feat/discord-bridge`) |
 | CI | `.github/workflows/ci.yml`: tests on Python 3.12 and 3.14, ruff `F,E9`, image smoke test, publish on `main` |
-| Tests | `tests/`, 108 tests (`python -m pytest tests -q`); `tests/conftest.py` has a fake hub and fake channels |
+| Tests | `tests/`, 112 tests (`python -m pytest tests -q`); `tests/conftest.py` has a fake hub and fake channels |
 | HiveMind message types | sends `recognizer_loop:utterance`; handles `speak`, `complete_intent_failure` (and the older `hive.complete_intent_failure`), `ovos.utterance.handled`, `hive.policy.denied` |
 | Rejected token | `LoginFailure` or gateway close 4004: writes `token_rejected` to `/dev/termination-log`, exit status 3 (`TokenRejected`, `report_token_rejected`) |
 | Bridge's own lines | `hivemind_discord_bridge/lines.py`: en, fr, es, de, it, pt, nl; `HIVEMIND_LANG`, then English |
-| Limits | messages older than 120 s not answered (`MAX_MESSAGE_AGE`); reply timeout 60 s (`REPLY_TIMEOUT`); typing renewed every 8 s; replies split at 2000 (`split.py`); replies sent with `AllowedMentions.none()`; 1024 channels remembered; replies being sent get 5 s at stop (`SEND_DRAIN`); at most 64 questions queued for the hub (`HUB_BACKLOG_MAX`) |
+| Limits | messages older than 120 s not answered (`MAX_MESSAGE_AGE`); reply timeout 60 s per question (`REPLY_TIMEOUT`, one wait per question); typing renewed every 8 s; replies split at 2000 (`split.py`); replies sent with `AllowedMentions.none()`; 1024 channels remembered; replies being sent get 5 s at stop (`SEND_DRAIN`); at most 64 questions queued for the hub (`HUB_BACKLOG_MAX`) |
 | License | Apache-2.0 |
 
 ## Settings

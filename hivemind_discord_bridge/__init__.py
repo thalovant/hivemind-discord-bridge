@@ -40,15 +40,16 @@ Threads, and why neither side waits for the other:
   and one at a time, in order.
 """
 import asyncio
+import itertools
 import math
 import re
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from functools import partial
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 import discord
 from hivemind_bus_client import (
@@ -103,9 +104,6 @@ ACL_DISALLOWED_TYPE = "acl_disallowed_type"
 REPLY_TIMEOUT = 60.0
 #: Discord shows "typing…" for 10 s after a typing trigger: renew it before.
 TYPING_EVERY = 8.0
-#: The "cannot answer right now" line is said at most once per person and
-#: channel in this many seconds, however many questions go unanswered.
-UNAVAILABLE_EVERY = 30.0
 #: Questions waiting for the hub-send thread at most. Beyond that the hub
 #: is not keeping up: the person is told at once instead of queueing more.
 HUB_BACKLOG_MAX = 64
@@ -113,9 +111,9 @@ HUB_BACKLOG_MAX = 64
 NO_PINGS = discord.AllowedMentions.none()
 #: When the bridge stops, replies already being sent get this long to finish.
 SEND_DRAIN = 5.0
-#: How long a question the bridge stopped waiting for is remembered, so a
-#: late answer to it is recognised and does not end other people's waits.
-ENDED_KEPT = 600.0
+#: How long a session that asked something is remembered, so a late answer
+#: or a second sentence for it is recognised and ends no one else's wait.
+SEEN_KEPT = 600.0
 #: How many channels' objects are kept, so a reply or "typing…" does not
 #: cost a fetch_channel API call.
 CHANNELS_KEPT = 1024
@@ -288,14 +286,16 @@ class HiveMindDiscordBridge:
         # in the order the hub spoke them; different channels do not wait
         # for each other. Only touched on the Discord loop.
         self._channel_sends: Dict[int, List] = {}
-        # Questions waiting for the hub, by (channel id, session id); when the
-        # last "typing…" went to each channel; when each was last told the
-        # hub cannot answer; the channels messages came from. Only touched
-        # on the Discord loop.
-        self._waits: Dict[Tuple[int, str], "_Wait"] = {}
+        # Questions waiting for the hub: one per question, oldest first, by
+        # (channel id, session id); when each session last asked something;
+        # how many replies per session are not yet followed by the hub's
+        # "handled"; when the last "typing…" went to each channel; the
+        # channels messages came from. Only touched on the Discord loop.
+        self._pending: Dict[Tuple[int, str], Deque["_Question"]] = {}
+        self._seen: Dict[Tuple[int, Optional[str]], float] = {}
+        self._replied: Dict[Tuple[int, Optional[str]], int] = {}
         self._typing_at: Dict[int, float] = {}
-        self._unavailable_at: Dict[Tuple[int, Optional[int]], float] = {}
-        self._ended: Dict[Tuple[int, str], float] = {}
+        self._numbers = itertools.count()
         self._hub_backlog = 0  # questions submitted to the hub-send thread, not yet sent
         self._sending: Set[asyncio.Task] = set()
         self._channels: "OrderedDict[int, object]" = OrderedDict()
@@ -457,7 +457,7 @@ class HiveMindDiscordBridge:
         if self._hub_backlog >= HUB_BACKLOG_MAX:
             LOG.warning(f"{self._hub_backlog} questions are waiting to be sent to "
                         f"the hub; not queueing one more from channel {channel.id}")
-            self._give_up(channel.id, session_id, author_id)
+            self._spawn(self._say_unavailable(channel.id))
             return
         # Sent on the hub-send thread, never on this loop, so the loop keeps
         # sending replies (and heartbeats) while the hub socket is slow;
@@ -466,7 +466,7 @@ class HiveMindDiscordBridge:
         sent = asyncio.get_running_loop().run_in_executor(
             self._hub_sender, self._forward_unless_late, time.monotonic(),
             text, message.author, channel.id)
-        self._expect_answer(channel.id, session_id, author_id)
+        question = self._expect_answer(channel.id, session_id, author_id)
         try:
             await sent
         except Exception as error:
@@ -474,7 +474,7 @@ class HiveMindDiscordBridge:
             # errors: name the kind of failure only.
             LOG.warning(f"could not send a message from channel {channel.id} to "
                         f"the hub: {type(error).__name__}")
-            self._give_up(channel.id, session_id, author_id)
+            self._give_up(question, channel.id)
         finally:
             self._hub_backlog -= 1
 
@@ -600,7 +600,7 @@ class HiveMindDiscordBridge:
         """The hub is done with a question: stop waiting for it, say nothing."""
         channel_id = message.context.get("channel_id")
         if channel_id is not None:
-            self._on_loop(self._answered, channel_id, _session_of(message))
+            self._on_loop(self._handled, channel_id, _session_of(message))
 
     def handle_denied(self, message: Message) -> None:
         """The hub refused a question (quota, rate limit, agent unreachable).
@@ -660,17 +660,17 @@ class HiveMindDiscordBridge:
         # The length, never the text: replies carry what people asked about,
         # and a debug log is kept, shipped and read far more widely than the chat.
         LOG.debug(f"Sending message to Discord channel {channel_id}: {len(text)} characters")
+        # The bookkeeping goes first, as a plain callback: callbacks run in the
+        # order the hub's messages came, and an "ovos.utterance.handled"
+        # right behind this reply must find it already counted (a task's
+        # first step would only run after that).
+        self._on_loop(self._reply_came, channel_id, session_id)
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._deliver(channel_id, session_id, text), loop)
+            future = asyncio.run_coroutine_threadsafe(self._send_in_order(channel_id, text), loop)
         except RuntimeError:  # the loop closed in between: shutting down
             LOG.warning("Discord loop stopped, dropping reply")
             return
         future.add_done_callback(partial(self._log_send_failure, channel_id))
-
-    async def _deliver(self, channel_id: int, session_id: Optional[str], text: str) -> None:
-        self._answered(channel_id, session_id)
-        await self._send_in_order(channel_id, text)
 
     async def _send_in_order(self, channel_id: int, text: str) -> None:
         """Send ``text`` to ``channel_id`` after the replies scheduled before it."""
@@ -693,9 +693,8 @@ class HiveMindDiscordBridge:
         # Discord clears "typing…" when the bot's message arrives: renew it
         # for anyone in this channel still waiting for an answer.
         self._typing_at.pop(channel_id, None)
-        for (waiting_channel, _), wait in list(self._waits.items()):
-            if waiting_channel == channel_id:
-                wait.wake.set()
+        for question in self._waiting_in(channel_id):
+            question.wake.set()
 
     async def _send(self, channel_id: int, text: str) -> None:
         """Post ``text``; several messages when it is too long for one.
@@ -728,103 +727,137 @@ class HiveMindDiscordBridge:
     # (all on the Discord loop)
     # ------------------------------------------------------------------
     def _expect_answer(self, channel_id: int, session_id: str,
-                       author_id: Optional[int] = None) -> None:
-        """Show "typing…" in ``channel_id`` until the hub answers ``session_id``.
+                       author_id: Optional[int] = None) -> Optional["_Question"]:
+        """Wait for the hub's answer to one question, showing "typing…".
 
-        If no answer comes within ``reply_timeout``, the person is told the
-        bridge cannot answer right now. A second question from the same
-        person before the answer restarts the wait; it does not add one.
+        Every question has its own wait, queued behind the earlier ones of
+        its session. "typing…" shows in ``channel_id`` while any question
+        there waits. A question with no answer within ``reply_timeout`` gets
+        its own "cannot answer right now" line. Returns the question, or
+        ``None`` with waiting off.
         """
         if not self.reply_timeout or self.reply_timeout <= 0:
-            return
+            return None
         loop = asyncio.get_running_loop()
         key = (channel_id, session_id)
-        wait = self._waits.get(key)
-        if wait is None or wait.task is None or wait.task.done():
-            wait = self._waits[key] = _Wait()
-            wait.task = loop.create_task(self._wait_for_answer(key, wait))
-        wait.deadline = loop.time() + self.reply_timeout
-        wait.questions += 1
-        wait.author_id = author_id  # the line, if it comes, answers the latest question
-        wait.wake.set()
+        question = _Question(channel_id, session_id, author_id,
+                             loop.time() + self.reply_timeout, next(self._numbers))
+        self._pending.setdefault(key, deque()).append(question)
+        self._remember_session(key)
+        question.task = loop.create_task(self._wait_for_answer(question))
+        return question
 
-    async def _wait_for_answer(self, key: Tuple[int, str], wait: "_Wait") -> None:
-        channel_id, session_id = key
+    async def _wait_for_answer(self, question: "_Question") -> None:
         loop = asyncio.get_running_loop()
         try:
-            while not wait.answered:
-                remaining = wait.deadline - loop.time()
+            while not question.done:
+                remaining = question.deadline - loop.time()
                 if remaining <= 0:
                     break
-                wait.wake.clear()
-                self._keep_typing(channel_id)
+                question.wake.clear()
+                self._keep_typing(question.channel_id)
                 try:
-                    await asyncio.wait_for(wait.wake.wait(), min(TYPING_EVERY, remaining))
+                    await asyncio.wait_for(question.wake.wait(), min(TYPING_EVERY, remaining))
                 except asyncio.TimeoutError:
                     pass
-            if not wait.answered:
-                LOG.info(f"no answer from the hub for channel {channel_id} in "
-                         f"{self.reply_timeout:g} s")
-                self._forget(key, wait)
-                await self._say_unavailable(channel_id, wait.author_id)
+            if not question.done:
+                LOG.info(f"no answer from the hub for a question in channel "
+                         f"{question.channel_id} in {self.reply_timeout:g} s")
+                self._end(question)
+                await self._say_unavailable(question.channel_id)
         finally:
-            self._forget(key, wait)
+            self._end(question)
 
-    def _forget(self, key: Tuple[int, str], wait: "_Wait") -> None:
-        wait.answered = True
-        if self._waits.get(key) is wait:
-            del self._waits[key]
-            now = time.monotonic()
-            for old in [k for k, at in self._ended.items() if now - at >= ENDED_KEPT]:
-                del self._ended[old]
-            self._ended[key] = now
-        if not any(channel == key[0] for channel, _ in self._waits):
-            self._typing_at.pop(key[0], None)
+    def _end(self, question: "_Question") -> None:
+        """Stop waiting for ``question`` (answered, given up or timed out)."""
+        if question.done:
+            return
+        question.done = True
+        question.wake.set()
+        key = (question.channel_id, question.session_id)
+        queue = self._pending.get(key)
+        if queue is not None:
+            try:
+                queue.remove(question)
+            except ValueError:
+                pass
+            if not queue:
+                del self._pending[key]
+        if not self._waiting_in(question.channel_id):
+            self._typing_at.pop(question.channel_id, None)
 
-    def _answered(self, channel_id: int, session_id: Optional[str]) -> None:
-        """The hub answered (or is done with) ``session_id`` in ``channel_id``.
+    def _waiting_in(self, channel_id: int) -> List["_Question"]:
+        """The questions waiting in ``channel_id``, oldest first."""
+        waiting = [q for (channel, _), queue in self._pending.items() if channel == channel_id
+                   for q in queue]
+        return sorted(waiting, key=lambda q: q.number)
 
-        A session the bridge is not waiting for (an answer without one, or
-        a hub that rewrote it) ends every wait in the channel: a "cannot
-        answer" line after an answer is worse than none. A late or second
-        answer to a question whose wait already ended ends nothing else.
+    def _remember_session(self, key: Tuple[int, Optional[str]]) -> None:
+        now = time.monotonic()
+        for old in [k for k, at in self._seen.items() if now - at >= SEEN_KEPT]:
+            del self._seen[old]
+            self._replied.pop(old, None)
+        self._seen[key] = now
+
+    def _oldest_answered_by(self, channel_id: int,
+                            session_id: Optional[str]) -> Optional["_Question"]:
+        """The question a hub message for ``session_id`` in ``channel_id`` is about.
+
+        The oldest waiting question of that session. For a session with
+        nothing waiting that asked recently, none: the message is another
+        sentence of an answer, or a late answer, and ends no one else's
+        wait. For no session (or one the bridge never saw), the oldest
+        question waiting in the channel, so other people's waits go on.
+        """
+        queue = self._pending.get((channel_id, session_id))
+        if queue:
+            return queue[0]
+        if session_id is not None and (channel_id, session_id) in self._seen:
+            return None
+        waiting = self._waiting_in(channel_id)
+        return waiting[0] if waiting else None
+
+    def _reply_came(self, channel_id: int, session_id: Optional[str]) -> None:
+        """A reply (``speak``, or the no-answer line) for ``session_id``: ends one wait."""
+        question = self._oldest_answered_by(channel_id, session_id)
+        if question is not None:
+            self._end(question)
+            key = (channel_id, session_id)
+            self._replied[key] = self._replied.get(key, 0) + 1
+            self._remember_session(key)
+
+    def _handled(self, channel_id: int, session_id: Optional[str]) -> None:
+        """The hub's ``ovos.utterance.handled`` for ``session_id``.
+
+        After a reply it only closes that reply's question (already ended).
+        Without one, a question was dealt with silently (a cancelled
+        utterance): its wait ends, quietly.
         """
         key = (channel_id, session_id)
-        if key in self._waits:
-            keys = [key]
-        elif session_id is not None and key in self._ended:
-            keys = []
-        else:
-            keys = [k for k in self._waits if k[0] == channel_id]
-        for done in keys:
-            wait = self._waits.get(done)
-            if wait is not None:
-                self._forget(done, wait)
-                wait.wake.set()
+        if self._replied.get(key):
+            self._replied[key] -= 1
+            return
+        question = self._oldest_answered_by(channel_id, session_id)
+        if question is not None:
+            self._end(question)
 
     def _denied(self) -> None:
-        # Only when the refusal can only be for one question: one wait, and
-        # one question in it (in a channel-scope channel several people can
-        # share a wait, and the refused one may not be the latest).
-        if len(self._waits) == 1:
-            (key, wait), = self._waits.items()
-            if wait.questions == 1:
-                self._give_up(key[0], key[1], wait.author_id)
+        # The refusal names no channel: only when exactly one question waits
+        # can it be that one.
+        waiting = [q for queue in self._pending.values() for q in queue]
+        if len(waiting) == 1:
+            self._give_up(waiting[0], waiting[0].channel_id)
 
-    def _give_up(self, channel_id: int, session_id: str, author_id: Optional[int]) -> None:
+    def _give_up(self, question: Optional["_Question"], channel_id: int) -> None:
         """The hub will not answer this question: stop waiting and say so now."""
-        self._answered(channel_id, session_id)
-        self._spawn(self._say_unavailable(channel_id, author_id))
+        if question is not None:
+            if question.done:
+                return
+            self._end(question)
+        self._spawn(self._say_unavailable(channel_id))
 
-    async def _say_unavailable(self, channel_id: int, author_id: Optional[int]) -> None:
-        """Say "cannot answer right now" to ``author_id`` in ``channel_id``, at most every 30 s."""
-        loop = asyncio.get_running_loop()
-        key, now = (channel_id, author_id), loop.time()
-        for old in [k for k, at in self._unavailable_at.items() if now - at >= UNAVAILABLE_EVERY]:
-            del self._unavailable_at[old]
-        if key in self._unavailable_at:
-            return
-        self._unavailable_at[key] = now
+    async def _say_unavailable(self, channel_id: int) -> None:
+        """Say "cannot answer right now" in ``channel_id``: once per unanswered question."""
         try:
             await self._send_in_order(channel_id, self.line(UNAVAILABLE))
         except Exception as error:
@@ -872,18 +905,22 @@ class HiveMindDiscordBridge:
                     f"{type(error).__name__}{detail}")
 
 
-class _Wait:
-    """A question waiting for the hub's answer."""
+class _Question:
+    """One question waiting for the hub's answer."""
 
-    __slots__ = ("deadline", "answered", "wake", "task", "author_id", "questions")
+    __slots__ = ("channel_id", "session_id", "author_id", "deadline", "number",
+                 "done", "wake", "task")
 
-    def __init__(self):
-        self.deadline = 0.0
-        self.answered = False
+    def __init__(self, channel_id: int, session_id: str, author_id: Optional[int],
+                 deadline: float, number: int):
+        self.channel_id = channel_id
+        self.session_id = session_id
+        self.author_id = author_id  # who asked it
+        self.deadline = deadline
+        self.number = number  # order of asking, across the bridge
+        self.done = False
         self.wake = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
-        self.author_id: Optional[int] = None  # who asked the latest question
-        self.questions = 0  # questions asked since the wait began
 
 
 def _session_of(message: Message) -> Optional[str]:

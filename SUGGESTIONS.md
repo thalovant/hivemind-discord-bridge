@@ -11,7 +11,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: reply-off-the-bus
 ## Per-person rate limit
 
 - **Problem:** AUDIT.md section 2: where the hub sets no limit, one person can flood it.
-- **Proposal:** a token bucket per (channel, person) in `HiveMindDiscordBridge.forward_to_hivemind`, answering with the "cannot answer right now" line (already rate limited per person, `UNAVAILABLE_EVERY`), configurable by flag and environment.
+- **Proposal:** a token bucket per (channel, person) in `HiveMindDiscordBridge.forward_to_hivemind`, answering with one short "slow down" line per burst, configurable by flag and environment.
 - **Impact:** high for any shared channel; small change.
 
 ## The hub echoes the refused message's context

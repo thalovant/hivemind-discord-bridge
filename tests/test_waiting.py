@@ -64,6 +64,12 @@ def running():
         each.stop()
 
 
+def waiting(made, channel_id=None):
+    """How many questions the bridge is waiting on (in ``channel_id``, or anywhere)."""
+    return sum(len(queue) for (channel, _), queue in list(made._pending.items())
+               if channel_id is None or channel == channel_id)
+
+
 def _answer_last(hub, text="it is noon"):
     _, message = hub.emitted[-1]
     hub.send("speak", {"utterance": text}, dict(message.context))
@@ -81,7 +87,7 @@ def test_typing_shows_at_once_is_renewed_and_stops_on_the_answer(running):
     count = len(bridge.typed())
     time.sleep(0.6)
     assert len(bridge.typed()) == count, "typing… went on after the answer"
-    assert not bridge.bridge._waits
+    assert waiting(bridge.bridge) == 0
 
 
 def test_no_answer_in_time_is_said_and_a_late_answer_still_comes(running):
@@ -104,7 +110,7 @@ def test_the_hub_done_without_an_answer_ends_the_wait_quietly(running):
     bridge.hub.send("ovos.utterance.handled", {}, dict(message.context))
     time.sleep(0.9)
     assert bridge.sent() == []
-    assert not bridge.bridge._waits
+    assert waiting(bridge.bridge) == 0
 
 
 def test_a_hub_that_cannot_be_reached_is_said_at_once(running):
@@ -128,7 +134,7 @@ def test_a_refusal_of_the_only_waiting_question_is_said_at_once(running):
     bridge.hub.send("hive.policy.denied", {"denied_type": "recognizer_loop:utterance",
                                            "code": "intent_quota_exceeded"}, {})
     assert wait_for(lambda: bridge.sent() == [LINES["en"][UNAVAILABLE]], timeout=2)
-    assert not bridge.bridge._waits
+    assert waiting(bridge.bridge) == 0
 
 
 def test_a_refusal_that_could_be_anyones_is_left_to_the_timeout(running):
@@ -139,16 +145,19 @@ def test_a_refusal_that_could_be_anyones_is_left_to_the_timeout(running):
     bridge.hub.send("hive.policy.denied", {"denied_type": "recognizer_loop:utterance"}, {})
     time.sleep(0.3)
     assert bridge.sent(1) == [] and bridge.sent(2) == []
-    assert len(bridge.bridge._waits) == 2
+    assert waiting(bridge.bridge) == 2
 
 
-def test_the_cannot_answer_line_is_not_repeated_to_the_same_person(running):
-    bridge = running(reply_timeout=0.3)
-    bridge.ask()
-    assert wait_for(lambda: bridge.sent(), timeout=2)
-    bridge.ask()
-    time.sleep(0.7)
-    assert bridge.sent() == [LINES["en"][UNAVAILABLE]]
+def test_each_unanswered_question_gets_its_own_line(running):
+    """One person asks twice; neither is answered: two lines, each at its own timeout."""
+    bridge = running(reply_timeout=0.4)
+    first = bridge.ask()
+    time.sleep(0.2)
+    second = bridge.ask()
+    assert wait_for(lambda: len(bridge.sent()) == 2, timeout=3)
+    assert bridge.sent() == [LINES["en"][UNAVAILABLE]] * 2
+    sends = [t for t, _, _ in bridge.channels[42].sent]
+    assert sends[0] - first >= 0.35 and sends[1] - second >= 0.35
 
 
 def test_waiting_can_be_turned_off(running):
@@ -197,11 +206,11 @@ def test_a_late_answer_to_an_expired_question_leaves_other_waits_alone(running):
     bridge.hub.send("speak", {"utterance": "late for alice"}, dict(alice.context))
     assert wait_for(lambda: "late for alice" in bridge.sent(500))
     time.sleep(0.05)
-    assert any(key[0] == 500 for key in bridge.bridge._waits), "Bob's wait was ended"
+    assert waiting(bridge.bridge, 500) == 1, "Bob's wait was ended"
 
 
-def test_each_person_in_a_shared_channel_is_told_when_the_hub_is_down(running):
-    """Channel scope: one session for the channel, but the line is throttled per person."""
+def test_each_question_in_a_shared_channel_is_told_when_the_hub_is_down(running):
+    """Channel scope: one session for the channel, one line per question that cannot go."""
     hub = FakeHub()
 
     def down(_):
@@ -216,8 +225,7 @@ def test_each_person_in_a_shared_channel_is_told_when_the_hub_is_down(running):
     _in_channel(bridge, channel, author_id=2)
     assert wait_for(lambda: len(bridge.sent(600)) == 2, timeout=2)
     _in_channel(bridge, channel, author_id=1, text="<@999> again")
-    time.sleep(0.3)
-    assert len(bridge.sent(600)) == 2, "the same person was told twice within 30 s"
+    assert wait_for(lambda: len(bridge.sent(600)) == 3, timeout=2)
 
 
 @pytest.mark.parametrize("setting", [{"reply_timeout": float("inf")}, {"reply_timeout": float("nan")},
@@ -266,8 +274,8 @@ def test_a_hub_that_does_not_keep_up_gets_no_endless_queue(running, monkeypatch)
     assert [message.context["channel_id"] for _, message in hub.emitted] == [1]
 
 
-def test_a_refusal_is_not_pinned_on_a_wait_shared_by_several_questions(running):
-    """Channel scope: two people's questions share one wait; the refused one is unknown."""
+def test_a_refusal_is_not_pinned_on_one_of_several_waiting_questions(running):
+    """Channel scope: two people's questions wait; the refused one is unknown."""
     bridge = running(reply_timeout=30)
     channel = bridge.fake.channel(800, dm=False)
     bridge.channels[800] = channel
@@ -277,4 +285,85 @@ def test_a_refusal_is_not_pinned_on_a_wait_shared_by_several_questions(running):
     bridge.hub.send("hive.policy.denied", {"denied_type": "recognizer_loop:utterance"}, {})
     time.sleep(0.3)
     assert bridge.sent(800) == []
-    assert len(bridge.bridge._waits) == 1
+    assert waiting(bridge.bridge, 800) == 2
+
+
+def _shared(bridge, channel_id):
+    channel = bridge.fake.channel(channel_id, dm=False)
+    bridge.channels[channel_id] = channel
+    return channel
+
+
+def test_two_people_in_one_channel_each_keep_their_wait(running):
+    """Channel scope: one session; the hub answers Alice; Bob still waits, then hears his own line."""
+    bridge = running(reply_timeout=0.8)
+    channel = _shared(bridge, 900)
+    _in_channel(bridge, channel, author_id=1)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 1)
+    _in_channel(bridge, channel, author_id=2)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 2)
+    _, alice = bridge.hub.emitted[0]
+    bridge.hub.send("speak", {"utterance": "noon, Alice"}, dict(alice.context))
+    bridge.hub.send("ovos.utterance.handled", {}, dict(alice.context))
+    assert wait_for(lambda: "noon, Alice" in bridge.sent(900))
+    time.sleep(0.1)
+    assert waiting(bridge.bridge, 900) == 1, "Bob's wait ended with Alice's answer"
+    count = len(bridge.typed(900))
+    assert wait_for(lambda: len(bridge.typed(900)) > count, timeout=1), "no typing… for Bob"
+    assert wait_for(lambda: bridge.sent(900)[-1:] == [LINES["en"][UNAVAILABLE]], timeout=3)
+    assert bridge.sent(900) == ["noon, Alice", LINES["en"][UNAVAILABLE]]
+
+
+def test_one_person_asking_twice_gets_one_wait_per_question(running):
+    """The first reply ends the first question's wait only; the second is answered next."""
+    bridge = running(reply_timeout=30, session_scope="person")
+    channel = _shared(bridge, 901)
+    _in_channel(bridge, channel, author_id=1)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 1)
+    _in_channel(bridge, channel, author_id=1, text="<@999> and the weather")
+    assert wait_for(lambda: len(bridge.hub.emitted) == 2)
+    _, first = bridge.hub.emitted[0]
+    _, second = bridge.hub.emitted[1]
+    bridge.hub.send("speak", {"utterance": "noon"}, dict(first.context))
+    bridge.hub.send("ovos.utterance.handled", {}, dict(first.context))
+    assert wait_for(lambda: bridge.sent(901) == ["noon"])
+    time.sleep(0.1)
+    assert waiting(bridge.bridge, 901) == 1
+    bridge.hub.send("speak", {"utterance": "sunny"}, dict(second.context))
+    assert wait_for(lambda: bridge.sent(901) == ["noon", "sunny"])
+    time.sleep(0.05)
+    assert waiting(bridge.bridge) == 0
+
+
+def test_a_second_sentence_of_an_answer_ends_no_other_wait(running):
+    """Person scope: Alice's answer comes in two speaks; Bob's wait is untouched."""
+    bridge = running(reply_timeout=30, session_scope="person")
+    channel = _shared(bridge, 902)
+    _in_channel(bridge, channel, author_id=1)
+    _in_channel(bridge, channel, author_id=2)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 2)
+    alice = next(m for _, m in bridge.hub.emitted if m.context["user"]["discord_user_id"] == 1)
+    for sentence in ("It is noon.", "Have a nice lunch."):
+        bridge.hub.send("speak", {"utterance": sentence}, dict(alice.context))
+    bridge.hub.send("ovos.utterance.handled", {}, dict(alice.context))
+    assert wait_for(lambda: len(bridge.sent(902)) == 2)
+    time.sleep(0.1)
+    assert waiting(bridge.bridge, 902) == 1
+
+
+def test_an_answer_with_no_session_ends_only_the_oldest_wait(running):
+    """Person scope: an answer that names no session ends Alice's wait, not Bob's."""
+    bridge = running(reply_timeout=30, session_scope="person")
+    channel = _shared(bridge, 903)
+    _in_channel(bridge, channel, author_id=1)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 1)
+    _in_channel(bridge, channel, author_id=2)
+    assert wait_for(lambda: len(bridge.hub.emitted) == 2)
+    _, alice = bridge.hub.emitted[0]
+    context = {k: v for k, v in alice.context.items() if k != "session"}
+    bridge.hub.send("speak", {"utterance": "noon"}, context)
+    assert wait_for(lambda: bridge.sent(903) == ["noon"])
+    time.sleep(0.1)
+    left = [q.author_id for queue in bridge.bridge._pending.values() for q in queue]
+    assert left == [2]
+
