@@ -25,6 +25,17 @@ recurring bug across every HiveMind bridge written so far:
   until a hub admin runs ``hivemind-core allow-msg
   recognizer_loop:utterance <client_id>`` (and usually ``speak`` too);
   this bridge cannot do that step itself. See the README.
+
+Threads, and why neither side waits for the other:
+
+- the asyncio loop runs discord.py (gateway, sends, "typing…") and owns
+  every piece of waiting state;
+- the HiveMind client's bus thread delivers the hub's messages one after
+  the other. ``speak()`` only schedules the send on the loop and returns:
+  a send that waited there would hold up every later hub message;
+- one hub-send thread runs every ``emit()``: never on the loop, where a
+  slow hub socket would hold up every reply and the gateway heartbeat,
+  and one at a time, in order.
 """
 import asyncio
 import re
@@ -47,6 +58,7 @@ from ovos_utils.log import LOG
 
 from hivemind_discord_bridge.health import HealthServer
 from hivemind_discord_bridge.lines import NO_ANSWER, UNAVAILABLE, bridge_line
+from hivemind_discord_bridge.split import DISCORD_LIMIT, split_message
 
 platform = "HiveMindDiscordBridgeV0.1"
 
@@ -89,6 +101,8 @@ TYPING_EVERY = 8.0
 #: The "cannot answer right now" line is said at most once per person and
 #: channel in this many seconds, however many questions go unanswered.
 UNAVAILABLE_EVERY = 30.0
+#: Replies mention no one: not @everyone, @here, a role, nor a person.
+NO_PINGS = discord.AllowedMentions.none()
 #: How many channels' objects are kept, so a reply or "typing…" does not
 #: cost a fetch_channel API call.
 CHANNELS_KEPT = 1024
@@ -607,8 +621,15 @@ class HiveMindDiscordBridge:
                 wait.wake.set()
 
     async def _send(self, channel_id: int, text: str) -> None:
+        """Post ``text``; several messages when it is too long for one.
+
+        Mentions in the text never ping anyone: the hub's answer can echo
+        what a person wrote ("say @everyone"), and the bot would otherwise
+        ping the whole server for them.
+        """
         channel = await self._resolve_channel(channel_id)
-        await channel.send(text)
+        for piece in split_message(text, DISCORD_LIMIT):
+            await channel.send(piece, allowed_mentions=NO_PINGS)
 
     def _keep_channel(self, channel) -> None:
         """Remember the channel a message came from, for its replies."""

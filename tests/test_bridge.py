@@ -232,7 +232,8 @@ def test_speak_schedules_send_on_discord_loop():
 
     asyncio.run(_drive())
     fake_discord.fetch_channel.assert_called_once_with(42)
-    fake_channel.send.assert_called_once_with("hi there")
+    fake_channel.send.assert_called_once()
+    assert fake_channel.send.call_args.args == ("hi there",)
 
 
 def test_speak_with_no_channel_id_is_ignored():
