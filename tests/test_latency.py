@@ -64,12 +64,13 @@ def test_burst_replies_do_not_queue_behind_each_other():
                "outbound_median": statistics.median(outbound), "outbound_max": max(outbound),
                "bus_held_max": max(hub.held)}
     typing = [c.typed[0] - dispatched[c.id] for c in channels if c.typed]
-    if typing:  # "typing…" shown after the message arrived
-        numbers["typing_median"], numbers["typing_max"] = statistics.median(typing), max(typing)
+    assert len(typing) == len(channels), "not every channel got typing…"
+    numbers["typing_median"], numbers["typing_max"] = statistics.median(typing), max(typing)
     _report("burst", numbers)
     assert numbers["inbound_max"] < LIMIT
     assert numbers["outbound_max"] < LIMIT, "replies waited for each other's send"
     assert numbers["bus_held_max"] < LIMIT, "a reply held the hub's bus thread"
+    assert numbers["typing_max"] < LIMIT, "typing… came late in a burst"
 
 
 def test_a_slow_hub_send_does_not_hold_up_replies():

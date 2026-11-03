@@ -97,6 +97,8 @@ def test_an_interior_whitespace_run_longer_than_a_piece_is_shortened_not_sent_em
     assert all(piece.strip() for piece in pieces)
     assert pieces[0].startswith("before") and pieces[-1].endswith("after")
     assert "".join(pieces).replace(" ", "") == "beforeafter"
+    # only what no message could hold (one message of spaces) may go
+    assert sum(piece.count(" ") for piece in pieces) >= 5000 - DISCORD_LIMIT
 
 
 def test_a_reply_discord_refuses_is_followed_by_the_cannot_answer_line():
@@ -114,6 +116,15 @@ def test_a_reply_discord_refuses_is_followed_by_the_cannot_answer_line():
         loop.dispatch(text_message("what time is it", channel))
         assert wait_for(lambda: [c for _, c, _ in channel.done] == [LINES["en"][UNAVAILABLE]],
                         timeout=5)
+        tried = [c for _, c, _ in channel.sent]
+        assert tried == ["the answer", LINES["en"][UNAVAILABLE]], "the answer was not tried first"
     finally:
         loop.stop()
         hub.close()
+
+
+def test_an_interior_whitespace_run_shorter_than_a_message_is_kept():
+    text = "a" * 2000 + " " * 1050 + "b" * 2000
+    pieces = split_message(text)
+    assert "".join(pieces) == text
+    assert all(piece.strip() for piece in pieces)

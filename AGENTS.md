@@ -166,8 +166,10 @@ casually.
   message and the client's keepalive. The Discord loop never calls
   `client.emit()`: hub sends go through the single `_hub_sender` thread, in
   order (the client's encrypted transport is not written from two threads,
-  and a blocked loop misses gateway heartbeats). Waiting state (`_pending`,
-  one `_Question` per question; typing; the per-channel send locks, the channel cache) lives on the loop
+  and a blocked loop misses gateway heartbeats); `stop()` shuts it down
+  with its queue cancelled. Waiting state (`_pending`, one `_Question` per
+  question, matched to replies by the `bridge_question` number the hub
+  echoes; typing; the per-channel send locks, the channel cache) lives on the loop
   only. `tests/test_latency.py` measures both directions; keep it green.
 - **Never log what people wrote.** `emit()` errors carry the serialized
   message: log the kind of error only.
