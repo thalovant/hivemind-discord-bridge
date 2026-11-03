@@ -45,6 +45,7 @@ from ovos_bus_client.message import Message
 from ovos_utils.log import LOG
 
 from hivemind_discord_bridge.health import HealthServer
+from hivemind_discord_bridge.lines import NO_ANSWER, bridge_line
 
 platform = "HiveMindDiscordBridgeV0.1"
 
@@ -70,6 +71,9 @@ DM_POLICIES = ("auto", "allow", "deny")
 #: RESUME after an outage delivers the events missed meanwhile, and a reply
 #: to a question asked long before means nothing any more.
 MAX_MESSAGE_AGE = 120
+
+#: ovos-core's "no skill could answer" and the name older hubs relayed it under.
+INTENT_FAILURE_TYPES = ("complete_intent_failure", "hive.complete_intent_failure")
 
 #: What the bridge writes to the termination log when Discord refuses the
 #: bot token, so the platform can ask for a new token instead of restarting
@@ -242,8 +246,8 @@ class HiveMindDiscordBridge:
         self.client.connect(site_id=self.site_id,
                            handshake_max_retries=self.handshake_max_retries)
         self.client.on_mycroft("speak", self.handle_speak)
-        self.client.on_mycroft("hive.complete_intent_failure",
-                               self.handle_intent_failure)
+        for msg_type in INTENT_FAILURE_TYPES:
+            self.client.on_mycroft(msg_type, self.handle_intent_failure)
         self._connected.set()
         LOG.info("== connected to HiveMind")
 
@@ -462,11 +466,26 @@ class HiveMindDiscordBridge:
         self.speak(utterance, channel_id)
 
     def handle_intent_failure(self, message: Message) -> None:
+        """No skill could answer: say so, in ``HIVEMIND_LANG``.
+
+        The one bridge-authored reply to a hub message: the hub sent no
+        utterance to relay. Current hubs relay ovos-core's
+        ``complete_intent_failure``; older ones sent
+        ``hive.complete_intent_failure``.
+        """
         channel_id = message.context.get("channel_id")
         if channel_id is None:
             return
-        LOG.error("complete intent failure")
-        self.speak("I don't know how to answer that", channel_id)
+        LOG.info("the hub found no answer (complete intent failure)")
+        self.speak(self.line(NO_ANSWER), channel_id)
+
+    def line(self, kind: str) -> str:
+        """A line the bridge says itself (see :mod:`hivemind_discord_bridge.lines`).
+
+        In ``lang`` (``HIVEMIND_LANG``) when there is a line in it, else in
+        English: a Discord message carries no language of its own.
+        """
+        return bridge_line(kind, self.lang)
 
     def speak(self, text: str, channel_id: int) -> None:
         """Post ``text`` back to ``channel_id``, without waiting for Discord.
