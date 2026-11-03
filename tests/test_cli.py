@@ -29,7 +29,8 @@ CLEAN = {name: None for name in (
     "HIVEMIND_ACCESS_KEY", "HIVEMIND_ACCESS_KEY_FILE", "HIVEMIND_PASSWORD",
     "HIVEMIND_PASSWORD_FILE", "HIVEMIND_HOST", "HIVEMIND_PORT", "HIVEMIND_SITE_ID",
     "HIVEMIND_SELF_SIGNED", "HIVEMIND_LANG", "DISCORD_REQUIRE_MENTION",
-    "DISCORD_SESSION_SCOPE", "BRIDGE_HEALTH_PORT", "DISCORD_DM_POLICY")}
+    "DISCORD_SESSION_SCOPE", "BRIDGE_HEALTH_PORT", "DISCORD_DM_POLICY",
+    "BRIDGE_REPLY_TIMEOUT")}
 
 
 def test_everything_can_come_from_the_environment(started):
@@ -45,6 +46,7 @@ def test_everything_can_come_from_the_environment(started):
         "HIVEMIND_LANG": "fr-fr",
         "DISCORD_SESSION_SCOPE": "person",
         "BRIDGE_HEALTH_PORT": "8080",
+        "BRIDGE_REPLY_TIMEOUT": "45",
     }, started)
     assert result.exit_code == 0, result.output
     assert options == {
@@ -52,6 +54,7 @@ def test_everything_can_come_from_the_environment(started):
         "port": 6000, "self_signed": True, "lang": "fr-fr", "site_id": "lounge",
         "allowed_channels": [42, 43], "require_mention": True,
         "session_scope": "person", "health_port": 8080, "dm_policy": "auto",
+        "reply_timeout": 45.0,
     }
 
 
@@ -121,3 +124,15 @@ def test_the_dm_policy_comes_from_a_flag_or_the_environment(started):
                started)[1]["dm_policy"] == "deny"
     result, _ = run(["--dm-policy", "sometimes"], {**CLEAN, "DISCORD_BOT_TOKEN": "tok"}, started)
     assert result.exit_code != 0
+
+
+def test_the_reply_timeout_defaults_to_a_minute_and_must_be_a_number(started):
+    result, options = run(["--token", "tok"], CLEAN, started)
+    assert result.exit_code == 0, result.output
+    assert options["reply_timeout"] == 60.0
+    result, options = run(["--token", "tok", "--reply-timeout", "0"], CLEAN, started)
+    assert options["reply_timeout"] == 0.0
+    for wrong in ("soon", "-1"):
+        result, _ = run(["--token", "tok"], {**CLEAN, "BRIDGE_REPLY_TIMEOUT": wrong}, started)
+        assert result.exit_code != 0
+        assert "reply-timeout" in result.output

@@ -30,10 +30,11 @@ import asyncio
 import re
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from functools import partial
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import discord
 from hivemind_bus_client import (
@@ -45,7 +46,7 @@ from ovos_bus_client.message import Message
 from ovos_utils.log import LOG
 
 from hivemind_discord_bridge.health import HealthServer
-from hivemind_discord_bridge.lines import NO_ANSWER, bridge_line
+from hivemind_discord_bridge.lines import NO_ANSWER, UNAVAILABLE, bridge_line
 
 platform = "HiveMindDiscordBridgeV0.1"
 
@@ -74,6 +75,23 @@ MAX_MESSAGE_AGE = 120
 
 #: ovos-core's "no skill could answer" and the name older hubs relayed it under.
 INTENT_FAILURE_TYPES = ("complete_intent_failure", "hive.complete_intent_failure")
+#: ovos-core's "this utterance is dealt with", sent after the answer, or
+#: alone when the hub chose not to answer (a cancelled utterance).
+HANDLED_TYPE = "ovos.utterance.handled"
+#: HiveMind-core's refusal of a message (quota, rate limit, agent down).
+DENIED_TYPE = "hive.policy.denied"
+
+#: Seconds the bridge waits for the hub's answer, showing "typing…", before
+#: it says it cannot answer. ``0`` turns waiting off (no typing, no line).
+REPLY_TIMEOUT = 60.0
+#: Discord shows "typing…" for 10 s after a typing trigger: renew it before.
+TYPING_EVERY = 8.0
+#: The "cannot answer right now" line is said at most once per person and
+#: channel in this many seconds, however many questions go unanswered.
+UNAVAILABLE_EVERY = 30.0
+#: How many channels' objects are kept, so a reply or "typing…" does not
+#: cost a fetch_channel API call.
+CHANNELS_KEPT = 1024
 
 #: What the bridge writes to the termination log when Discord refuses the
 #: bot token, so the platform can ask for a new token instead of restarting
@@ -136,6 +154,7 @@ class HiveMindDiscordBridge:
                  health_port: Optional[int] = None,
                  dm_policy: str = "auto",
                  max_message_age: float = MAX_MESSAGE_AGE,
+                 reply_timeout: float = REPLY_TIMEOUT,
                  *,
                  client: Optional[HiveMessageBusClient] = None,
                  discord_client: Optional[discord.Client] = None):
@@ -171,6 +190,10 @@ class HiveMindDiscordBridge:
             is set and allows them otherwise.
         max_message_age: messages sent longer ago than this many seconds
             are not answered (they were delivered late, after an outage).
+        reply_timeout: seconds to wait for the hub's answer, showing
+            "typing…" in the channel, before saying the bridge cannot answer
+            right now. A late answer is still delivered. ``0`` turns this
+            off.
         client: pre-built HiveMessageBusClient (tests / advanced setups).
             NOTE: HiveMessageBusClient does NOT open a connection in
             __init__ -- call start() (or connect_hivemind()) to connect.
@@ -196,6 +219,7 @@ class HiveMindDiscordBridge:
             dm_policy = "deny" if self.allowed_channels is not None else "allow"
         self.dm_policy = dm_policy
         self.max_message_age = max_message_age
+        self.reply_timeout = reply_timeout
 
         if discord_client is not None:
             self.discord = discord_client
@@ -232,6 +256,15 @@ class HiveMindDiscordBridge:
         # in the order the hub spoke them; different channels do not wait
         # for each other. Only touched on the Discord loop.
         self._channel_sends: Dict[int, List] = {}
+        # Questions waiting for the hub, by (channel id, session id); when the
+        # last "typing…" went to each channel; when each was last told the
+        # hub cannot answer; the channels messages came from. Only touched
+        # on the Discord loop.
+        self._waits: Dict[Tuple[int, str], "_Wait"] = {}
+        self._typing_at: Dict[int, float] = {}
+        self._unavailable_at: Dict[Tuple[int, str], float] = {}
+        self._channels: "OrderedDict[int, object]" = OrderedDict()
+        self._background: Set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -248,6 +281,8 @@ class HiveMindDiscordBridge:
         self.client.on_mycroft("speak", self.handle_speak)
         for msg_type in INTENT_FAILURE_TYPES:
             self.client.on_mycroft(msg_type, self.handle_intent_failure)
+        self.client.on_mycroft(HANDLED_TYPE, self.handle_handled)
+        self.client.on_mycroft(DENIED_TYPE, self.handle_denied)
         self._connected.set()
         LOG.info("== connected to HiveMind")
 
@@ -371,16 +406,22 @@ class HiveMindDiscordBridge:
                        "HiveMind yet")
             return
 
-        # Sent on the hub-send thread, never on this loop: the loop keeps
-        # sending replies (and heartbeats) while the hub socket is slow.
+        self._keep_channel(channel)
+        # Sent on the hub-send thread, never on this loop, so the loop keeps
+        # sending replies (and heartbeats) while the hub socket is slow;
+        # "typing…" starts while it goes.
+        sent = asyncio.get_running_loop().run_in_executor(
+            self._hub_sender, self.forward_to_hivemind, text, message.author, channel.id)
+        session_id = self.session_id(channel.id, message.author)
+        self._expect_answer(channel.id, session_id)
         try:
-            await asyncio.get_running_loop().run_in_executor(
-                self._hub_sender, self.forward_to_hivemind, text, message.author, channel.id)
+            await sent
         except Exception as error:
             # emit() puts the whole message, text included, in some of its
             # errors: name the kind of failure only.
             LOG.warning(f"could not send a message from channel {channel.id} to "
                         f"the hub: {type(error).__name__}")
+            self._give_up(channel.id, session_id)
 
     def _is_stale(self, message: "discord.Message") -> bool:
         """Whether ``message`` was sent more than ``max_message_age`` ago."""
@@ -463,7 +504,7 @@ class HiveMindDiscordBridge:
         utterance = message.data.get("utterance")
         if not utterance:
             return
-        self.speak(utterance, channel_id)
+        self.speak(utterance, channel_id, _session_of(message))
 
     def handle_intent_failure(self, message: Message) -> None:
         """No skill could answer: say so, in ``HIVEMIND_LANG``.
@@ -477,7 +518,34 @@ class HiveMindDiscordBridge:
         if channel_id is None:
             return
         LOG.info("the hub found no answer (complete intent failure)")
-        self.speak(self.line(NO_ANSWER), channel_id)
+        self.speak(self.line(NO_ANSWER), channel_id, _session_of(message))
+
+    def handle_handled(self, message: Message) -> None:
+        """The hub is done with a question: stop waiting for it, say nothing."""
+        channel_id = message.context.get("channel_id")
+        if channel_id is not None:
+            self._on_loop(self._answered, channel_id, _session_of(message))
+
+    def handle_denied(self, message: Message) -> None:
+        """The hub refused a question (quota, rate limit, agent unreachable).
+
+        The refusal names no channel. When exactly one question is waiting
+        it can only be that one, and the person is told now; otherwise the
+        reply timeout tells them.
+        """
+        if message.data.get("denied_type") != "recognizer_loop:utterance":
+            return
+        LOG.info(f"the hub refused a question: {message.data.get('code')}")
+        self._on_loop(self._denied)
+
+    def _on_loop(self, callback: Callable, *args) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(callback, *args)
+        except RuntimeError:  # closed in between: shutting down
+            pass
 
     def line(self, kind: str) -> str:
         """A line the bridge says itself (see :mod:`hivemind_discord_bridge.lines`).
@@ -487,7 +555,7 @@ class HiveMindDiscordBridge:
         """
         return bridge_line(kind, self.lang)
 
-    def speak(self, text: str, channel_id: int) -> None:
+    def speak(self, text: str, channel_id: int, session_id: Optional[str] = None) -> None:
         """Post ``text`` back to ``channel_id``, without waiting for Discord.
 
         Called from the HiveMind bus's own thread, never from the
@@ -507,11 +575,16 @@ class HiveMindDiscordBridge:
         # and a debug log is kept, shipped and read far more widely than the chat.
         LOG.debug(f"Sending message to Discord channel {channel_id}: {len(text)} characters")
         try:
-            future = asyncio.run_coroutine_threadsafe(self._send_in_order(channel_id, text), loop)
+            future = asyncio.run_coroutine_threadsafe(
+                self._deliver(channel_id, session_id, text), loop)
         except RuntimeError:  # the loop closed in between: shutting down
             LOG.warning("Discord loop stopped, dropping reply")
             return
         future.add_done_callback(partial(self._log_send_failure, channel_id))
+
+    async def _deliver(self, channel_id: int, session_id: Optional[str], text: str) -> None:
+        self._answered(channel_id, session_id)
+        await self._send_in_order(channel_id, text)
 
     async def _send_in_order(self, channel_id: int, text: str) -> None:
         """Send ``text`` to ``channel_id`` after the replies scheduled before it."""
@@ -526,12 +599,141 @@ class HiveMindDiscordBridge:
             entry[1] -= 1
             if entry[1] == 0:
                 self._channel_sends.pop(channel_id, None)
+        # Discord clears "typing…" when the bot's message arrives: renew it
+        # for anyone in this channel still waiting for an answer.
+        self._typing_at.pop(channel_id, None)
+        for (waiting_channel, _), wait in list(self._waits.items()):
+            if waiting_channel == channel_id:
+                wait.wake.set()
 
     async def _send(self, channel_id: int, text: str) -> None:
-        channel = self.discord.get_channel(channel_id)
+        channel = await self._resolve_channel(channel_id)
+        await channel.send(text)
+
+    def _keep_channel(self, channel) -> None:
+        """Remember the channel a message came from, for its replies."""
+        self._channels[channel.id] = channel
+        self._channels.move_to_end(channel.id)
+        while len(self._channels) > CHANNELS_KEPT:
+            self._channels.popitem(last=False)
+
+    async def _resolve_channel(self, channel_id: int):
+        """The channel object: remembered, cached by discord.py, or fetched (an API call)."""
+        channel = self._channels.get(channel_id) or self.discord.get_channel(channel_id)
         if channel is None:
             channel = await self.discord.fetch_channel(channel_id)
-        await channel.send(text)
+            self._keep_channel(channel)
+        return channel
+
+    # ------------------------------------------------------------------
+    # waiting for the hub: "typing…", then a line if no answer comes
+    # (all on the Discord loop)
+    # ------------------------------------------------------------------
+    def _expect_answer(self, channel_id: int, session_id: str) -> None:
+        """Show "typing…" in ``channel_id`` until the hub answers ``session_id``.
+
+        If no answer comes within ``reply_timeout``, the person is told the
+        bridge cannot answer right now. A second question from the same
+        person before the answer restarts the wait; it does not add one.
+        """
+        if not self.reply_timeout or self.reply_timeout <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        key = (channel_id, session_id)
+        wait = self._waits.get(key)
+        if wait is None or wait.task is None or wait.task.done():
+            wait = self._waits[key] = _Wait()
+            wait.task = loop.create_task(self._wait_for_answer(key, wait))
+        wait.deadline = loop.time() + self.reply_timeout
+        wait.wake.set()
+
+    async def _wait_for_answer(self, key: Tuple[int, str], wait: "_Wait") -> None:
+        channel_id, session_id = key
+        loop = asyncio.get_running_loop()
+        try:
+            while not wait.answered:
+                remaining = wait.deadline - loop.time()
+                if remaining <= 0:
+                    break
+                wait.wake.clear()
+                self._keep_typing(channel_id)
+                try:
+                    await asyncio.wait_for(wait.wake.wait(), min(TYPING_EVERY, remaining))
+                except asyncio.TimeoutError:
+                    pass
+            if not wait.answered:
+                LOG.info(f"no answer from the hub for channel {channel_id} in "
+                         f"{self.reply_timeout:g} s")
+                self._forget(key, wait)
+                await self._say_unavailable(channel_id, session_id)
+        finally:
+            self._forget(key, wait)
+
+    def _forget(self, key: Tuple[int, str], wait: "_Wait") -> None:
+        wait.answered = True
+        if self._waits.get(key) is wait:
+            del self._waits[key]
+        if not any(channel == key[0] for channel, _ in self._waits):
+            self._typing_at.pop(key[0], None)
+
+    def _answered(self, channel_id: int, session_id: Optional[str]) -> None:
+        """The hub answered (or is done with) ``session_id`` in ``channel_id``.
+
+        A session the bridge is not waiting for (an answer without one, or
+        a hub that rewrote it) ends every wait in the channel: a "cannot
+        answer" line after an answer is worse than none.
+        """
+        key = (channel_id, session_id)
+        keys = [key] if key in self._waits else [k for k in self._waits if k[0] == channel_id]
+        for done in keys:
+            wait = self._waits.get(done)
+            if wait is not None:
+                self._forget(done, wait)
+                wait.wake.set()
+
+    def _denied(self) -> None:
+        if len(self._waits) == 1:
+            (channel_id, session_id), = self._waits
+            self._give_up(channel_id, session_id)
+
+    def _give_up(self, channel_id: int, session_id: str) -> None:
+        """The hub will not answer this question: stop waiting and say so now."""
+        self._answered(channel_id, session_id)
+        self._spawn(self._say_unavailable(channel_id, session_id))
+
+    async def _say_unavailable(self, channel_id: int, session_id: str) -> None:
+        loop = asyncio.get_running_loop()
+        key, now = (channel_id, session_id), loop.time()
+        for old in [k for k, at in self._unavailable_at.items() if now - at >= UNAVAILABLE_EVERY]:
+            del self._unavailable_at[old]
+        if key in self._unavailable_at:
+            return
+        self._unavailable_at[key] = now
+        try:
+            await self._send_in_order(channel_id, self.line(UNAVAILABLE))
+        except Exception as error:
+            self._log_failure(channel_id, error)
+
+    def _keep_typing(self, channel_id: int) -> None:
+        """Trigger "typing…" in ``channel_id`` unless it was moments ago."""
+        loop = asyncio.get_running_loop()
+        last = self._typing_at.get(channel_id)
+        if last is not None and loop.time() - last < TYPING_EVERY * 0.75:
+            return
+        self._typing_at[channel_id] = loop.time()
+        self._spawn(self._send_typing(channel_id))
+
+    async def _send_typing(self, channel_id: int) -> None:
+        try:
+            channel = await self._resolve_channel(channel_id)
+            await channel.typing()  # awaited, not entered: one trigger, ~10 s
+        except Exception as error:  # cosmetic: never let it fail anything
+            LOG.debug(f"no typing indicator in channel {channel_id}: {type(error).__name__}")
+
+    def _spawn(self, coroutine) -> None:
+        task = asyncio.get_running_loop().create_task(coroutine)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     @classmethod
     def _log_send_failure(cls, channel_id: int, future: Future) -> None:
@@ -552,6 +754,24 @@ class HiveMindDiscordBridge:
             detail = ""
         LOG.warning(f"failed to send a reply to Discord channel {channel_id}: "
                     f"{type(error).__name__}{detail}")
+
+
+class _Wait:
+    """A question waiting for the hub's answer."""
+
+    __slots__ = ("deadline", "answered", "wake", "task")
+
+    def __init__(self):
+        self.deadline = 0.0
+        self.answered = False
+        self.wake = asyncio.Event()
+        self.task: Optional[asyncio.Task] = None
+
+
+def _session_of(message: Message) -> Optional[str]:
+    """The session id a hub message answers, when it says."""
+    session = message.context.get("session")
+    return session.get("session_id") if isinstance(session, dict) else None
 
 
 __all__ = ["HiveMindDiscordBridge", "TokenRejected", "report_token_rejected", "platform"]

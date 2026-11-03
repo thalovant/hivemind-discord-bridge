@@ -15,7 +15,7 @@ import click
 from ovos_utils.log import LOG
 
 import hivemind_discord_bridge
-from hivemind_discord_bridge import HiveMindDiscordBridge, TokenRejected
+from hivemind_discord_bridge import REPLY_TIMEOUT, HiveMindDiscordBridge, TokenRejected
 
 
 def connect_discord_to_hivemind(token, key=None, password=None,
@@ -23,13 +23,13 @@ def connect_discord_to_hivemind(token, key=None, password=None,
                                 lang="en-us", site_id="discord",
                                 allowed_channels=None, require_mention=True,
                                 session_scope="channel", health_port=None,
-                                dm_policy="auto"):
+                                dm_policy="auto", reply_timeout=REPLY_TIMEOUT):
     bridge = HiveMindDiscordBridge(
         token=token, key=key, password=password, host=host, port=port,
         self_signed=self_signed, lang=lang, site_id=site_id,
         allowed_channels=allowed_channels, require_mention=require_mention,
         session_scope=session_scope, health_port=health_port,
-        dm_policy=dm_policy,
+        dm_policy=dm_policy, reply_timeout=reply_timeout,
     )
     bridge.start()
     return bridge
@@ -89,6 +89,11 @@ def _channel_ids(ctx, param, values):
 @click.option("--health-port", type=int, default=None, envvar="BRIDGE_HEALTH_PORT",
              help="serve /healthz and /readyz on this port (default: off) "
                   "[BRIDGE_HEALTH_PORT]")
+@click.option("--reply-timeout", type=click.FloatRange(min=0), default=REPLY_TIMEOUT,
+             envvar="BRIDGE_REPLY_TIMEOUT", show_default=True,
+             help="seconds to wait for the hub's answer, showing typing..., before "
+                  "saying it cannot answer right now; 0 turns this off "
+                  "[BRIDGE_REPLY_TIMEOUT]")
 @click.option("--access-key", "key", default=None, envvar="HIVEMIND_ACCESS_KEY",
              help="HiveMind access key (default: from identity file) [HIVEMIND_ACCESS_KEY]")
 @click.option("--password", default=None, envvar="HIVEMIND_PASSWORD",
@@ -105,7 +110,7 @@ def _channel_ids(ctx, param, values):
 @click.option("--lang", default="en-us", envvar="HIVEMIND_LANG",
              help="utterance language [HIVEMIND_LANG]")
 def main(token, allowed_channels, dm_policy, require_mention, session_scope,
-        health_port, key, password, host, port, site_id, self_signed, lang):
+        health_port, reply_timeout, key, password, host, port, site_id, self_signed, lang):
     """Bridge a Discord bot to a HiveMind node.
 
     When Discord refuses the bot token, writes token_rejected to
@@ -131,6 +136,7 @@ def main(token, allowed_channels, dm_policy, require_mention, session_scope,
             session_scope=session_scope,
             health_port=health_port,
             dm_policy=dm_policy,
+            reply_timeout=reply_timeout,
         )
     except TokenRejected:
         LOG.error("Discord rejected the bot token; replace it to start the bridge again")
