@@ -29,7 +29,9 @@ recurring bug across every HiveMind bridge written so far:
 import asyncio
 import re
 import threading
-from typing import Iterable, Optional
+from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
+from typing import Dict, Iterable, List, Optional
 
 import discord
 from hivemind_bus_client import (
@@ -204,6 +206,16 @@ class HiveMindDiscordBridge:
         self._connected = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._token_rejected = False
+        # Every hub send goes through this one thread: off the Discord loop
+        # (a slow or reconnecting hub socket must not hold up replies or the
+        # gateway heartbeat), and one at a time, in order (the client's
+        # encrypted transport is not meant to be written from two threads).
+        self._hub_sender = ThreadPoolExecutor(max_workers=1,
+                                              thread_name_prefix="hivemind-send")
+        # channel id -> [lock, sends waiting]: replies to one channel go out
+        # in the order the hub spoke them; different channels do not wait
+        # for each other. Only touched on the Discord loop.
+        self._channel_sends: Dict[int, List] = {}
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -341,7 +353,16 @@ class HiveMindDiscordBridge:
                        "HiveMind yet")
             return
 
-        self.forward_to_hivemind(text, message.author, channel.id)
+        # Sent on the hub-send thread, never on this loop: the loop keeps
+        # sending replies (and heartbeats) while the hub socket is slow.
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                self._hub_sender, self.forward_to_hivemind, text, message.author, channel.id)
+        except Exception as error:
+            # emit() puts the whole message, text included, in some of its
+            # errors: name the kind of failure only.
+            LOG.warning(f"could not send a message from channel {channel.id} to "
+                        f"the hub: {type(error).__name__}")
 
     def addressed_text(self, message: "discord.Message", is_dm: bool) -> Optional[str]:
         """The text to forward, or ``None`` when the message is not for the bot.
@@ -375,6 +396,11 @@ class HiveMindDiscordBridge:
         return bot_id is not None and author is not None and getattr(author, "id", None) == bot_id
 
     def forward_to_hivemind(self, text: str, author, channel_id: int) -> None:
+        """Emit ``text`` to the hub as an utterance from ``author`` in ``channel_id``.
+
+        Blocking (it writes to the hub socket): ``on_message`` runs it on the
+        hub-send thread.
+        """
         username = getattr(author, "name", None) or str(getattr(author, "id", "unknown"))
         msg = Message(
             "recognizer_loop:utterance",
@@ -418,33 +444,70 @@ class HiveMindDiscordBridge:
         self.speak("I don't know how to answer that", channel_id)
 
     def speak(self, text: str, channel_id: int) -> None:
-        """Post ``text`` back to ``channel_id``.
+        """Post ``text`` back to ``channel_id``, without waiting for Discord.
 
         Called from the HiveMind bus's own thread, never from the
         asyncio loop discord.py runs on. Scheduling the send with
         ``run_coroutine_threadsafe`` is what makes that safe -- an
         ``await`` called directly from a foreign thread would raise or
-        silently do nothing depending on timing.
+        silently do nothing depending on timing. It returns at once: the
+        bus thread also delivers every other hub message (and the client's
+        keepalive), so it never waits for a send; a failure is logged when
+        the send ends.
         """
-        if self._loop is None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
             LOG.warning("Discord loop not running yet, dropping reply")
             return
         # The length, never the text: replies carry what people asked about,
         # and a debug log is kept, shipped and read far more widely than the chat.
         LOG.debug(f"Sending message to Discord channel {channel_id}: {len(text)} characters")
-        future = asyncio.run_coroutine_threadsafe(
-            self._send(channel_id, text), self._loop
-        )
         try:
-            future.result(timeout=10)
-        except Exception:
-            LOG.exception(f"failed to send Discord message to channel={channel_id}")
+            future = asyncio.run_coroutine_threadsafe(self._send_in_order(channel_id, text), loop)
+        except RuntimeError:  # the loop closed in between: shutting down
+            LOG.warning("Discord loop stopped, dropping reply")
+            return
+        future.add_done_callback(partial(self._log_send_failure, channel_id))
+
+    async def _send_in_order(self, channel_id: int, text: str) -> None:
+        """Send ``text`` to ``channel_id`` after the replies scheduled before it."""
+        entry = self._channel_sends.get(channel_id)
+        if entry is None:
+            entry = self._channel_sends[channel_id] = [asyncio.Lock(), 0]
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                await self._send(channel_id, text)
+        finally:
+            entry[1] -= 1
+            if entry[1] == 0:
+                self._channel_sends.pop(channel_id, None)
 
     async def _send(self, channel_id: int, text: str) -> None:
         channel = self.discord.get_channel(channel_id)
         if channel is None:
             channel = await self.discord.fetch_channel(channel_id)
         await channel.send(text)
+
+    @classmethod
+    def _log_send_failure(cls, channel_id: int, future: Future) -> None:
+        if future.cancelled():
+            return
+        error = future.exception()
+        if error is not None:
+            cls._log_failure(channel_id, error)
+
+    @staticmethod
+    def _log_failure(channel_id: int, error: BaseException) -> None:
+        # Discord's own status and code ("403 Forbidden (error code: 50013):
+        # Missing Permissions") help and hold no message text; anything
+        # else, the kind only.
+        if isinstance(error, discord.HTTPException):
+            detail = f": {error.status} (error code: {error.code})"
+        else:
+            detail = ""
+        LOG.warning(f"failed to send a reply to Discord channel {channel_id}: "
+                    f"{type(error).__name__}{detail}")
 
 
 __all__ = ["HiveMindDiscordBridge", "TokenRejected", "report_token_rejected", "platform"]
