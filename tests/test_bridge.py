@@ -76,7 +76,7 @@ def test_connect_hivemind_calls_connect_once_and_registers_handlers():
     fake_client.run_forever.assert_not_called()
     assert bridge._connected.is_set()
     registered = {call.args[0] for call in fake_client.on_mycroft.call_args_list}
-    assert registered == {"speak", "hive.complete_intent_failure"}
+    assert {"speak", "complete_intent_failure", "hive.complete_intent_failure"} <= registered
 
 
 def test_connect_hivemind_bounds_handshake_retries():
@@ -228,11 +228,12 @@ def test_speak_schedules_send_on_discord_loop():
         bridge._loop = asyncio.get_running_loop()
         msg = Message("speak", {"utterance": "hi there"}, {"channel_id": 42})
         bridge.handle_speak(msg)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)  # let the scheduled send run
 
     asyncio.run(_drive())
     fake_discord.fetch_channel.assert_called_once_with(42)
-    fake_channel.send.assert_called_once_with("hi there")
+    fake_channel.send.assert_called_once()
+    assert fake_channel.send.call_args.args == ("hi there",)
 
 
 def test_speak_with_no_channel_id_is_ignored():
@@ -263,9 +264,120 @@ def test_intent_failure_speaks_fallback():
         bridge._loop = asyncio.get_running_loop()
         msg = Message("hive.complete_intent_failure", {}, {"channel_id": 42})
         bridge.handle_intent_failure(msg)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)  # let the scheduled send run
 
     asyncio.run(_drive())
     fake_channel.send.assert_called_once()
     (text,), _ = fake_channel.send.call_args
     assert "don't know" in text
+
+
+def _bridge_on_a_running_loop():
+    """A bridge whose Discord loop runs in its own thread, as in production."""
+    import threading
+
+    bridge, fake_client, fake_discord, fake_channel = _make_bridge()
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    bridge._loop = loop
+    return bridge, fake_discord, fake_channel, loop
+
+
+def test_speak_returns_without_waiting_for_discord():
+    """The hub's bus thread hands the reply over and goes back to the hub."""
+    import time
+
+    from ovos_bus_client.message import Message
+
+    bridge, fake_discord, fake_channel, loop = _bridge_on_a_running_loop()
+
+    async def slow_send(*args, **kwargs):
+        await asyncio.sleep(0.5)
+
+    fake_channel.send = AsyncMock(side_effect=slow_send)
+    try:
+        started = time.monotonic()
+        bridge.handle_speak(Message("speak", {"utterance": "hi"}, {"channel_id": 42}))
+        assert time.monotonic() - started < 0.1
+        deadline = time.monotonic() + 2
+        while not fake_channel.send.await_count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert fake_channel.send.await_count == 1
+        assert fake_channel.send.call_args.args[0] == "hi"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+
+def test_replies_to_one_channel_keep_their_order():
+    """A slow first send must not let the second reply overtake it."""
+    import time
+
+    from ovos_bus_client.message import Message
+
+    bridge, fake_discord, fake_channel, loop = _bridge_on_a_running_loop()
+    events = []
+    channels = {}
+
+    def channel_for(channel_id):
+        if channel_id not in channels:
+            channel = MagicMock()
+
+            async def send(text, **kwargs):
+                events.append(("start", channel_id, text))
+                await asyncio.sleep(0.2 if text == "first" else 0)
+                events.append(("end", channel_id, text))
+
+            channel.send = AsyncMock(side_effect=send)
+            channels[channel_id] = channel
+        return channels[channel_id]
+
+    fake_discord.get_channel = MagicMock(side_effect=channel_for)
+    try:
+        for text in ("first", "second"):
+            bridge.handle_speak(Message("speak", {"utterance": text}, {"channel_id": 42}))
+        bridge.handle_speak(Message("speak", {"utterance": "other"}, {"channel_id": 7}))
+        deadline = time.monotonic() + 2
+        while len(events) < 6 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        in_channel = [event for event in events if event[1] == 42]
+        assert in_channel == [("start", 42, "first"), ("end", 42, "first"),
+                              ("start", 42, "second"), ("end", 42, "second")]
+        # another channel did not wait behind the slow send
+        assert events.index(("end", 7, "other")) < events.index(("end", 42, "first"))
+        assert not bridge._channel_sends, "per-channel send state must not pile up"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+
+def test_a_failed_hub_send_never_logs_the_text(monkeypatch):
+    """emit() raises with the serialized message in its text when the hub is down."""
+    import hivemind_discord_bridge as bridge_module
+
+    lines = []
+    log = MagicMock()
+    for level in ("debug", "info", "warning", "error", "exception"):
+        getattr(log, level).side_effect = lambda *a, **k: lines.append(" ".join(map(str, a)))
+    monkeypatch.setattr(bridge_module, "LOG", log)
+
+    bridge, fake_client, fake_discord, _ = _make_bridge()
+    bridge.connect_hivemind()
+    fake_client.emit.side_effect = RuntimeError("Failed to emit : {'utterances': ['my secret']}")
+    asyncio.run(bridge.on_message(_fake_message(text="my secret", is_dm=True)))
+    assert any("RuntimeError" in line for line in lines)
+    assert "my secret" not in "\n".join(lines)
+
+
+def test_the_bridge_builds_the_real_hub_client_without_connecting(monkeypatch, tmp_path):
+    """Every other test injects a mock client; the real constructor must work too."""
+    from hivemind_bus_client import HiveMessageBusClient
+
+    from hivemind_discord_bridge import HiveMindDiscordBridge
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    bridge = HiveMindDiscordBridge(token="t", key="k", password="p",
+                                   host="ws://127.0.0.1", port=5678,
+                                   discord_client=MagicMock())
+    assert type(bridge.client) is HiveMessageBusClient
+    assert not bridge._connected.is_set()
+    assert not getattr(bridge.client, "started_running", False)

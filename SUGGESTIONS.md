@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-policy (refused by default when channels are listed).
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: reply-off-the-bus-thread and localized lines done; hub refusal context and termination reasons proposed.
 
 # Suggestions: hivemind-discord-bridge
 
@@ -10,21 +10,33 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-po
 
 ## Per-person rate limit
 
-- **Problem:** AUDIT.md section 2: one person can flood the hub.
-- **Proposal:** a token bucket per (channel, person) in `HiveMindDiscordBridge.forward_to_hivemind`, with a short "slow down" reply, configurable by flag and environment.
+- **Problem:** AUDIT.md section 2: where the hub sets no limit, one person can flood it.
+- **Proposal:** a token bucket per (channel, person) in `HiveMindDiscordBridge.forward_to_hivemind`, answering with one short "slow down" line per burst, configurable by flag and environment.
 - **Impact:** high for any shared channel; small change.
 
-## Reply off the bus thread
+## The hub echoes the refused message's context
 
-- **Problem:** AUDIT.md section 4.
-- **Proposal:** schedule the send and return; log failures from the future's callback instead of waiting.
-- **Impact:** medium; removes head-of-line blocking.
+- **Problem:** AUDIT.md section 13: `hive.policy.denied` names no channel, so with several questions waiting the person learns of a refusal only at the reply timeout.
+- **Proposal:** HiveMind-core adds the refused message's `context` (or just its session id) to `hive.policy.denied`; the bridge then ends exactly that wait (`_give_up`).
+- **Impact:** medium; immediate feedback on quota or rate refusals in busy channels.
 
-## Localised fallback line
+## More termination reasons
 
-- **Problem:** AUDIT.md section 3.
-- **Proposal:** take the line from a small per-language table keyed by `--lang`, or let the hub supply it.
+- **Problem:** AUDIT.md section 16: only a rejected token is told apart from a crash.
+- **Proposal:** the same termination-log mechanism for 4014 (`intent_required`: enable the Message Content intent or keep mention gating) and, once hivemind-bus-client raises a distinct error for it, a hub that refuses the bridge's credentials (`hub_rejected`).
+- **Impact:** medium; the platform can tell the owner what to change instead of restarting.
+
+## A per-person language
+
+- **Problem:** the bridge's lines follow `HIVEMIND_LANG` only; a Discord message carries no language.
+- **Proposal:** use the guild's `preferred_locale` when the server set one other than the default, behind a flag (most servers keep `en-US`, which would override a French hub).
 - **Impact:** low.
+
+## Drain on SIGTERM
+
+- **Problem:** AUDIT.md section 19: replies being sent are drained on `stop()`, but a container stop sends SIGTERM, which ends the process at once.
+- **Proposal:** in `__main__.main`, turn SIGTERM into `bridge.stop()` (a signal handler that calls it from the main thread), so the 5 s drain runs on every stop.
+- **Impact:** low to medium; replies in flight during a rollout are not cut.
 
 ## Reproducible images
 
@@ -34,5 +46,10 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-po
 
 ## Platform integration
 
-- **Proposal:** run the image as the managed bridge workload described in the Thalovant bridges plan: a platform-set connection kind, credentials and identity from a Secret, `--session-scope person`, `--health-port` for probes, allow-list always set.
+- **Proposal:** run the image as the managed bridge workload described in the Thalovant bridges plan: a platform-set connection kind, credentials and identity from a Secret, `--session-scope person`, `--health-port` for probes, allow-list always set, `terminationMessagePolicy` reading `/dev/termination-log`.
 - **Impact:** high; this is what the fork is for.
+
+## Done
+
+- Reply off the bus thread (2026-11-03): AUDIT.md section 4.
+- Localised fallback line (2026-11-03): AUDIT.md section 3.

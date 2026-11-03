@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-02 - Motive: Address the CI and documentation review: publish from main only, sign before :latest, pinned audit evidence, qualified claims.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: rejected token reported, Discord and hub never wait for each other, stale messages, localized lines, typing..., long replies, no pings.
 
 # HiveMind Discord Bridge
 
@@ -129,6 +129,7 @@ host could read it:
 | `--no-require-mention` | `DISCORD_REQUIRE_MENTION` (`true`/`false`) |
 | `--session-scope` | `DISCORD_SESSION_SCOPE` (`channel`/`person`) |
 | `--health-port` | `BRIDGE_HEALTH_PORT` |
+| `--reply-timeout` | `BRIDGE_REPLY_TIMEOUT` (seconds, default 60, `0` off) |
 | `--access-key` | `HIVEMIND_ACCESS_KEY` |
 | `--password` | `HIVEMIND_PASSWORD` |
 | `--host` | `HIVEMIND_HOST` |
@@ -175,8 +176,24 @@ every start is refused.
   message, carrying the Discord channel id and author in the message
   context so the hub's `speak` reply can be routed back to the right
   channel.
-- Posts `speak` replies (and a fixed fallback line on
-  `hive.complete_intent_failure`) back into the originating channel or DM.
+- Posts `speak` replies back into the originating channel or DM, as soon
+  as they arrive: the hub's bus thread never waits for Discord, and the
+  Discord loop never waits for the hub. Replies to one channel keep their
+  order; a reply longer than Discord's 2000 characters goes out as
+  several messages, in order; a reply never pings anyone
+  (`AllowedMentions.none()`), whatever `@everyone` or mention it echoes.
+- Shows "typing…" from the moment a question arrives until the hub
+  answers. With no answer within `--reply-timeout` (60 s), or at once when
+  the hub cannot be reached or refuses the question just asked, it says
+  it cannot answer right now. When no skill matches
+  (`complete_intent_failure`) it says it does not know. These lines are
+  in `HIVEMIND_LANG` when there is one for it, else English
+  (`hivemind_discord_bridge/lines.py`).
+- Does not answer a message delivered more than 120 s after it was sent
+  (events a gateway RESUME replays after an outage).
+- When Discord refuses the bot token (`LoginFailure` at login, or the
+  gateway closing with 4004 later), writes `token_rejected` to
+  `/dev/termination-log` and exits with status 3.
 
 ## Voice channels — not built, documented as a future direction
 
@@ -196,6 +213,8 @@ pytest tests/
 ```
 
 The test suite mocks both the `discord.Client` and the HiveMind
-`HiveMessageBusClient`, so it runs without a live token or hub. It has
+`HiveMessageBusClient` (`tests/conftest.py` has a fake hub with its own bus
+thread and fake channels on a live event loop), so it runs without a live
+token or hub. It has
 not been exercised against a real Discord bot or a real HiveMind hub —
 that needs an actual bot token, which this repository does not have.
