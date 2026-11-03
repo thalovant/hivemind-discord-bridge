@@ -21,10 +21,12 @@ recurring bug across every HiveMind bridge written so far:
   bot talking to itself reaches the hub.
 - host/port are configuration, not constants (``ws://127.0.0.1:5678``
   is only ever a default value).
-- a freshly registered HiveMind client is denied every message type
-  until a hub admin runs ``hivemind-core allow-msg
-  recognizer_loop:utterance <client_id>`` (and usually ``speak`` too);
-  this bridge cannot do that step itself. See the README.
+- the hub decides which message types this client may send (on a
+  self-managed hub an admin runs ``hivemind-core allow-msg
+  recognizer_loop:utterance <client_id>``); this bridge cannot do that
+  step itself. It says so in its log only when the hub actually refuses
+  an utterance for that reason (``hive.policy.denied``, code
+  ``acl_disallowed_type``). See the README.
 
 Threads, and why neither side waits for the other:
 
@@ -92,6 +94,8 @@ INTENT_FAILURE_TYPES = ("complete_intent_failure", "hive.complete_intent_failure
 HANDLED_TYPE = "ovos.utterance.handled"
 #: HiveMind-core's refusal of a message (quota, rate limit, agent down).
 DENIED_TYPE = "hive.policy.denied"
+#: The refusal code for a message type the hub does not allow this client.
+ACL_DISALLOWED_TYPE = "acl_disallowed_type"
 
 #: Seconds the bridge waits for the hub's answer, showing "typing…", before
 #: it says it cannot answer. ``0`` turns waiting off (no typing, no line).
@@ -279,6 +283,7 @@ class HiveMindDiscordBridge:
         self._unavailable_at: Dict[Tuple[int, str], float] = {}
         self._channels: "OrderedDict[int, object]" = OrderedDict()
         self._background: Set[asyncio.Task] = set()
+        self._told_about_acl = False  # bus thread only
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -316,13 +321,6 @@ class HiveMindDiscordBridge:
             self._health = HealthServer(self.health_port, self.ready)
             self._health.start()
         self.connect_hivemind()
-        LOG.warning(
-            "a freshly registered HiveMind client is denied every message "
-            "type until an admin runs `hivemind-core allow-msg "
-            "recognizer_loop:utterance <client_id>` on the hub (and "
-            "usually `speak` too). If messages seem to vanish silently, "
-            "check that first."
-        )
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
@@ -549,7 +547,17 @@ class HiveMindDiscordBridge:
         """
         if message.data.get("denied_type") != "recognizer_loop:utterance":
             return
-        LOG.info(f"the hub refused a question: {message.data.get('code')}")
+        code = message.data.get("code")
+        if code == ACL_DISALLOWED_TYPE and not self._told_about_acl:
+            # Said once, and only now that the hub has refused one: a managed
+            # hub grants the type itself, and a hint at every start misleads.
+            self._told_about_acl = True
+            LOG.warning("the hub does not allow this bridge to send "
+                        "recognizer_loop:utterance (acl_disallowed_type). On a "
+                        "self-managed hub an admin grants it with `hivemind-core "
+                        "allow-msg recognizer_loop:utterance <client_id>`.")
+        else:
+            LOG.info(f"the hub refused a question: {code}")
         self._on_loop(self._denied)
 
     def _on_loop(self, callback: Callable, *args) -> None:

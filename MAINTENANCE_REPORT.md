@@ -12,13 +12,14 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: rejected token re
 4. The bridge's own lines in seven languages from `HIVEMIND_LANG` (`lines.py`, same table as the Telegram bridge); `complete_intent_failure`, which current hubs send, is handled.
 5. "typing…" while the hub thinks; "cannot answer right now" at the reply timeout (60 s, `BRIDGE_REPLY_TIMEOUT`), or at once when the hub is unreachable or refuses the only waiting question; `ovos.utterance.handled` ends a wait quietly. Channels are remembered, so replies stop costing `fetch_channel` calls (AUDIT section 9).
 6. Long replies split at 2000, every character kept (`split.py`); replies never ping anyone (`AllowedMentions.none()`); module docstring says which thread does what.
-7. Docs: README, QUICK_FACTS, FAQ, AUDIT (sections 3, 4 and 9 fixed, 10-17 added), SUGGESTIONS, docs/index.md, AGENTS.md (stale handshake-retries text corrected).
+7. The start-up WARNING about `hivemind-core allow-msg` is gone: it was false on a managed hub. The hint is logged once, only when the hub refuses an utterance with `acl_disallowed_type`.
+8. Docs: README, QUICK_FACTS, FAQ, AUDIT (sections 3, 4 and 9 fixed, 10-18 added), SUGGESTIONS, docs/index.md, AGENTS.md (stale handshake-retries text corrected).
 
 **Rationale:** the owner asked for the live chat bridges to be perfect, solid, fast and polished. The rejected-token state lets the platform ask for a new token instead of restarting forever; the threading change removes head-of-line blocking that grew with every simultaneous person and kept hub slowness off the gateway; the rest closes gaps where a person got silence (no-answer never fired, long replies lost, hub down), a stale answer, or where the bot could be made to ping a whole server.
 
 **Verification**
 
-- `python -m pytest tests -q`: 92 passed on Python 3.14.8 and 3.12 (local venvs). New tests were checked to fail without their change (the old code at `ba1daaa`, or the change reverted in place): non-blocking speak, per-channel order, emit text in logs, stale messages, channel reuse, split, no pings.
+- `python -m pytest tests -q`: 95 passed on Python 3.14.8 and 3.12 (local venvs). New tests were checked to fail without their change (the old code at `ba1daaa`, or the change reverted in place): non-blocking speak, per-channel order, emit text in logs, stale messages, channel reuse, split, no pings, the permission hint.
 - `ruff check --isolated --select F,E9 .`: clean.
 - Latency, `tests/test_latency.py` (fake hub + fake channels, messages dispatched as discord.py does; send 300 ms; second scenario: hub send 250 ms):
 

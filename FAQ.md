@@ -58,3 +58,7 @@ No. Replies are sent with `discord.AllowedMentions.none()` (`NO_PINGS`): a hub a
 
 It is sent as several messages, in order, with every character kept (`hivemind_discord_bridge/split.py`, `split_message`); cuts fall on paragraph, line, sentence or word boundaries.
 
+## The log says the hub does not allow this bridge to send `recognizer_loop:utterance`
+
+The hub refused a question with `hive.policy.denied`, code `acl_disallowed_type`: its message-type ACL does not list `recognizer_loop:utterance` for this client. On a self-managed hub an admin runs `hivemind-core allow-msg recognizer_loop:utterance <client_id>` (and `speak`); on a managed hub the platform grants it, so the line means the grant is missing. The bridge logs it once, and only after such a refusal (`HiveMindDiscordBridge.handle_denied`); it no longer warns about it at every start.
+
