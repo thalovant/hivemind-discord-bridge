@@ -12,7 +12,7 @@ import pytest
 
 import hivemind_discord_bridge as bridge_module
 from hivemind_discord_bridge import HiveMindDiscordBridge
-from hivemind_discord_bridge.lines import LINES, UNAVAILABLE
+from hivemind_discord_bridge.lines import LINES, NO_ANSWER, UNAVAILABLE
 
 from conftest import DiscordLoop, FakeChannel, FakeDiscord, FakeHub, text_message, wait_for
 
@@ -472,7 +472,8 @@ def test_a_refusal_counts_from_the_send_not_from_the_queue(running, monkeypatch)
     """The second question waits 0.6 s for the hub socket; its refusal still finds it."""
     monkeypatch.setattr(bridge_module, "REFUSAL_WINDOW", 0.3)
     hub = FakeHub(emit_delay=lambda m: 0.6 if m.context["channel_id"] == 1 else 0,
-                  refuse=lambda m: m.context["channel_id"] == 2)
+                  refuse=lambda m: m.context["channel_id"] == 2,
+                  answer=lambda m: "noon" if m.context["channel_id"] == 1 else None)
     bridge = running(hub, reply_timeout=30)
     bridge.ask(channel_id=1, author_id=1)
     bridge.ask(channel_id=2, author_id=2)
@@ -510,7 +511,8 @@ def test_stopping_sends_no_question_still_queued_for_the_hub(running):
     bridge = running(hub, reply_timeout=30)
     bridge.ask(channel_id=1, author_id=1)
     bridge.ask(channel_id=2, author_id=2)
-    time.sleep(0.15)  # the first is being sent, the second waits for the thread
+    assert wait_for(hub.emitting.is_set)  # the first is being sent
+    assert wait_for(lambda: bridge.bridge._hub_backlog == 2)  # the second is queued behind it
     bridge.bridge.stop()
     time.sleep(1.0)
     assert [message.context["channel_id"] for _, message in hub.emitted] == [1]
@@ -525,3 +527,112 @@ def test_a_whitespace_only_answer_is_not_a_reply(running):
     time.sleep(0.3)
     assert bridge.sent() == []
     assert waiting(bridge.bridge) == 1, "an answer nobody could see ended the wait"
+
+
+def test_a_refusal_during_a_slow_send_finds_its_question(running, monkeypatch):
+    """The hub refuses 0.4 s into a 0.8 s socket write: past the window, still sending."""
+    monkeypatch.setattr(bridge_module, "REFUSAL_WINDOW", 0.2)
+    hub = FakeHub(emit_delay=0.8, refuse=lambda m: True, refuse_early=0.4)
+    bridge = running(hub, reply_timeout=30)
+    bridge.ask()
+    assert wait_for(lambda: bridge.sent() == [LINES["en"][UNAVAILABLE]], timeout=2)
+
+
+def test_a_refusal_after_a_slow_send_finds_its_question(running, monkeypatch):
+    """The window runs from the end of the send: a 0.6 s write, a 0.2 s window."""
+    monkeypatch.setattr(bridge_module, "REFUSAL_WINDOW", 0.2)
+    hub = FakeHub(emit_delay=0.6, refuse=lambda m: True)
+    bridge = running(hub, reply_timeout=30)
+    bridge.ask()
+    assert wait_for(lambda: bridge.sent() == [LINES["en"][UNAVAILABLE]], timeout=2)
+
+
+def test_an_answered_question_is_no_candidate_for_a_refusal(running):
+    """The first was answered (so admitted): the refusal can only be the second's."""
+    hub = FakeHub(answer=lambda m: "noon" if m.context["channel_id"] == 1 else None,
+                  refuse=lambda m: m.context["channel_id"] == 2)
+    bridge = running(hub, reply_timeout=30)
+    bridge.ask(channel_id=1, author_id=1)
+    assert wait_for(lambda: bridge.sent(1) == ["noon"])
+    bridge.ask(channel_id=2, author_id=2)
+    assert wait_for(lambda: bridge.sent(2) == [LINES["en"][UNAVAILABLE]], timeout=2)
+
+
+def test_once_the_hub_echoes_numbers_an_unnumbered_reply_ends_no_wait(running):
+    bridge = running(reply_timeout=30, session_scope="person")
+    channel = _shared(bridge, 950)
+    _in_channel(bridge, channel, author_id=1)
+    assert wait_for(lambda: bridge.hub.emitted)
+    _, first = bridge.hub.emitted[0]
+    bridge.hub.send("speak", {"utterance": "noon"}, dict(first.context))  # numbered
+    assert wait_for(lambda: bridge.sent(950) == ["noon"])
+    _in_channel(bridge, channel, author_id=1, text="<@999> and the weather")
+    assert wait_for(lambda: len(bridge.hub.emitted) == 2)
+    unnumbered = {k: v for k, v in first.context.items() if k != "bridge_question"}
+    bridge.hub.send("speak", {"utterance": "a reminder"}, unnumbered)
+    assert wait_for(lambda: "a reminder" in bridge.sent(950))
+    time.sleep(0.05)
+    assert waiting(bridge.bridge, 950) == 1, "a reply naming no question ended one"
+
+
+def test_a_hub_that_drops_the_numbers_still_ends_waits_by_person(running):
+    hub = FakeHub(echo_numbers=False)
+    bridge = running(hub, reply_timeout=30, session_scope="person")
+    channel = _shared(bridge, 951)
+    _in_channel(bridge, channel, author_id=1)
+    assert wait_for(lambda: hub.emitted)
+    _, first = hub.emitted[0]
+    assert "bridge_question" not in first.context
+    hub.send("speak", {"utterance": "noon"}, dict(first.context))
+    assert wait_for(lambda: bridge.sent(951) == ["noon"])
+    time.sleep(0.05)
+    assert waiting(bridge.bridge, 951) == 0
+
+
+def test_a_blank_answer_then_handled_is_told(running):
+    """Nothing to show, then "handled": not a cancelled utterance, so the line comes."""
+    bridge = running(reply_timeout=30)
+    bridge.ask()
+    assert wait_for(lambda: bridge.hub.emitted)
+    _, message = bridge.hub.emitted[0]
+    bridge.hub.send("speak", {"utterance": "  "}, dict(message.context))
+    bridge.hub.send("ovos.utterance.handled", {}, dict(message.context))
+    assert wait_for(lambda: bridge.sent() == [LINES["en"][UNAVAILABLE]], timeout=2)
+
+
+def test_a_cancelled_question_still_ends_quietly(running):
+    bridge = running(reply_timeout=0.5)
+    bridge.ask()
+    assert wait_for(lambda: bridge.hub.emitted)
+    _, message = bridge.hub.emitted[0]
+    bridge.hub.send("ovos.utterance.handled", {}, dict(message.context))
+    time.sleep(0.9)
+    assert bridge.sent() == []
+
+
+def test_a_line_the_full_queue_cannot_take_is_sent_when_it_drains(running, monkeypatch):
+    monkeypatch.setattr(bridge_module, "SENDS_PER_CHANNEL_MAX", 1)
+    monkeypatch.setattr(bridge_module, "LINES_ROOM", 0)
+    bridge = running(reply_timeout=0.2)
+    channel = bridge.fake.channel(960, latency=0.6)
+    bridge.channels[960] = channel
+    bridge.loop.dispatch(text_message("what time is it", channel))
+    assert wait_for(lambda: bridge.hub.emitted)
+    bridge.bridge.speak("busy", 960, "another-session")  # holds the only slot 0.6 s
+    assert wait_for(lambda: bridge.sent(960) == ["busy", LINES["en"][UNAVAILABLE]], timeout=3), \
+        "the owed line never came"
+
+
+def test_the_no_answer_line_has_room_past_the_cap(running, monkeypatch):
+    monkeypatch.setattr(bridge_module, "SENDS_PER_CHANNEL_MAX", 1)
+    bridge = running(reply_timeout=30)
+    channel = bridge.fake.channel(961, latency=0.5)
+    bridge.channels[961] = channel
+    bridge.loop.dispatch(text_message("what time is it", channel))
+    assert wait_for(lambda: bridge.hub.emitted)
+    _, message = bridge.hub.emitted[0]
+    bridge.bridge.speak("busy", 961, "another-session")
+    assert wait_for(lambda: channel.sent)
+    bridge.hub.send("complete_intent_failure", {}, dict(message.context))
+    assert wait_for(lambda: len(bridge.sent(961)) == 2, timeout=3)
+    assert bridge.sent(961) == ["busy", LINES["en"][NO_ANSWER]]

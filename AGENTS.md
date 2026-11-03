@@ -147,8 +147,9 @@ casually.
   `message.data["utterance"]` to Discord unmodified; do not reformat,
   truncate, or add bridge-specific decoration to hub-authored text. A reply
   longer than one Discord message is split (`split.py`) in order, never
-  shortened (only a whitespace run longer than a whole message, which
-  Discord could not send, loses what does not fit), and sent with
+  shortened: a whitespace run that would make a blank message is joined
+  to the text next to it (`_place_whitespace`), only whitespace no message
+  could carry beside visible text is left out; and it is sent with
   `AllowedMentions.none()`
   so it pings no one. The bridge-authored lines are the ones in
   `lines.py`, said only when the hub sent nothing to relay: no skill
