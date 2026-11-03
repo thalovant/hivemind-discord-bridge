@@ -14,7 +14,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Direct messages follow --dm-po
 | Image user | `bridge`, uid 10001; identity in `/home/bridge/.config/hivemind` |
 | Default branch | `main` (upstream: `JarbasHiveMind/hivemind-discord-bridge`, branch `feat/discord-bridge`) |
 | CI | `.github/workflows/ci.yml`: tests on Python 3.12 and 3.14, ruff `F,E9`, image smoke test, publish on `main` |
-| Tests | `tests/`, 42 tests (`python -m pytest tests -q`) |
+| Tests | `tests/`, 47 tests (`python -m pytest tests -q`) |
 | HiveMind message types | sends `recognizer_loop:utterance`; handles `speak`, `hive.complete_intent_failure` |
 | License | Apache-2.0 |
 
