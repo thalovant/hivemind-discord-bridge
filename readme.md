@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Polish pass: rejected token reported, Discord and hub never wait for each other, stale messages, localized lines, typing..., long replies, no pings.
-
 # HiveMind Discord Bridge
 
 This bridges a Discord bot to a HiveMind node. A HiveMind bridge is a
